@@ -250,6 +250,52 @@ RequestInterceptor tokenInterceptor() {
 
 ---
 
+## 八.1 调用日志：成功和失败都打印请求参数与响应
+
+`RequestInterceptor` 只能在请求发送前执行，拿不到响应结果。如果你想**无论成功还是失败都打印请求参数和响应**，最实用的方式是用 **Spring AOP 切面** 统一拦截所有 Feign 接口调用：
+
+```java
+@Aspect
+@Component
+@Slf4j
+public class FeignLogAspect {
+
+    /**
+     * 切所有被 @FeignClient 标注的接口
+     */
+    @Around("@within(org.springframework.cloud.openfeign.FeignClient)")
+    public Object log(ProceedingJoinPoint pjp) throws Throwable {
+        String name = pjp.getSignature().toShortString();
+        Object[] args = pjp.getArgs();
+
+        long start = System.currentTimeMillis();
+        try {
+            Object result = pjp.proceed();
+            log.info("Feign 调用成功 | 方法名称: {} | 请求参数: {} | 响应: {} | 耗时: {}ms",
+                    name, JSON.toJSONString(args), JSON.toJSONString(result), System.currentTimeMillis() - start);
+            return result;
+        } catch (Throwable t) {
+            log.error("Feign 调用失败 | 方法名称: {} | 请求参数: {} | 错误: {} | 耗时: {}ms",
+                    name, JSON.toJSONString(args), t.getMessage(), System.currentTimeMillis() - start);
+            throw t;  // 异常继续向上抛，不影响 fallback 等后续逻辑
+        }
+    }
+}
+```
+
+**为什么用 AOP 而不是 RequestInterceptor？**
+
+| 方式 | 能拿到请求参数？ | 能拿到响应结果？ | 能捕获异常？ |
+|------|:---:|:---:|:---:|
+| `RequestInterceptor` | ✅（RequestTemplate） | ❌ | ❌ |
+| **AOP 切面** | ✅ | ✅ | ✅ |
+
+AOP 在 Feign 代理的 `invoke()` 之外包裹一层，所以能拿到完整的请求参数、返回值和异常，成功走 `try` 打印，失败走 `catch` 打印，然后 `throw t` 把异常继续抛给 fallback/调用方处理。
+
+**注意**：如果请求/响应体很大，`JSON.toJSONString()` 可能产生大量日志，生产环境建议按需过滤敏感字段或限制日志长度。
+
+---
+
 ## 九、熔断降级（fallback）
 
 ```java
