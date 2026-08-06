@@ -7,10 +7,12 @@
 
 - [OpenFeign 技术原理](OpenFeign-Notes.md)
 - [SpringMVC 实现细节](SpringMVC-Handler-Notes.md)
-- [SpringBoot 自动装配](SpringBoot-AutoConfiguration-Notes.md)实现原理
+- [SpringBoot 自动装配](SpringBoot-AutoConfiguration-Notes.md)
 - [Mybatis与MybatisPlus](MyBatis-Core-Notes.md)
 - [Dubbo](Dubbo-Core-Notes.md)
 - [SpringCloud 全家桶](SpringCloud-Core-Notes.md)
+- [Spring Cloud Gateway 核心要点](SpringCloud-Gateway-Notes.md)
+- [服务雪崩防护：限流、熔断与降级](Service-Protection-Notes.md)
 - 分布式消息队列 Kafka 与 RocketMQ
 - Spring 的依赖注入实现与循环依赖问题
 - Spring Bean 的生命周期
