@@ -7,11 +7,11 @@
 
 - [OpenFeign 技术原理](OpenFeign-Notes.md)
 - [SpringMVC 实现细节](SpringMVC-Handler-Notes.md)
-- SpringBoot 自动装配
-- Mybatis与MybatisPlus
-- Dubbo
+- [SpringBoot 自动装配](SpringBoot-AutoConfiguration-Notes.md)实现原理
+- [Mybatis与MybatisPlus](MyBatis-Core-Notes.md)
+- [Dubbo](Dubbo-Core-Notes.md)
+- [SpringCloud 全家桶](SpringCloud-Core-Notes.md)
 - 分布式消息队列 Kafka 与 RocketMQ
-- Spring Cloud Gateway
 - Spring 的依赖注入实现与循环依赖问题
 - Spring Bean 的生命周期
 
@@ -44,7 +44,6 @@
 - JWT 技术原理与单点登录
 - 分库分表
 - 库存超卖问题解决
-- 自定义 SpringBoot Starter 怎么实现
 - Redis与Mysql双写一致性（延迟双删）
 - 分布式系统常问问题（CAP 理论，分布式共识算法，分布式 ID 生成）
 - 限流、熔断、降级
