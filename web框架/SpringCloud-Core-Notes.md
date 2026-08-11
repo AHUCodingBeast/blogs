@@ -277,6 +277,125 @@ public class UserLbConfig {
 
 > 💡 **生产增强建议**：简单取模在实例增减时会导致大量用户重新映射。生产环境应使用**一致性 Hash 环 + 虚拟节点**（如 Guava `ConsistentHashing`），使实例变更时仅影响少量用户。同时可通过 Nacos metadata 标记实例版本/机房，配合自定义 LoadBalancer 实现灰度发布和就近路由。
 
+### HTTP 连接复用机制：Spring Cloud 如何管理 TCP 连接？
+
+很多开发者误以为 Spring Cloud 每次 HTTP 调用都会新建 TCP 连接，实际上**底层 HTTP 客户端通过连接池实现了同 IP:Port 的连接复用**。
+
+#### 连接复用的基本原理
+
+```
+Consumer
+    │
+    ├── 第1次调用 getUser(1L) ──► user-service 实例A (192.168.1.100:8080)
+    │   └── 建立 TCP 连接 → 发送 HTTP GET /users/1 → 收到响应 → 连接归还连接池
+    │
+    ├── 第2次调用 getSchool(1L) ──► user-service 实例A (192.168.1.100:8080)
+    │   └── 从连接池取出复用同一条 TCP 连接 → 发送 HTTP GET /users/1/school → 收到响应
+    │
+    └── 第3次调用 getUser(2L) ──► user-service 实例B (192.168.1.101:8080)
+        └── 新建另一条 TCP 连接（因为 IP 不同）→ 完成后归还连接池
+```
+
+> ⚠️ **核心约束**：TCP 连接由四元组（源IP、源端口、目标IP、目标端口）唯一确定。**不同 IP 的实例必须建立独立连接**，连接复用仅在**同一 IP:Port** 内有效。这与 Dubbo 的物理约束完全一致。
+
+#### 各 HTTP 客户端的连接池实现
+
+| 客户端 | 连接池实现 | 默认行为 | OpenFeign 默认使用 |
+| :--- | :--- | :--- | :--- |
+| `HttpURLConnection` | JDK 内置 `KeepAliveCache` | 同目标地址复用，空闲超时关闭 | ✅ 是 |
+| OkHttp | `ConnectionPool` | 最多 5 个空闲连接，5 分钟超时 | ❌ 需引入 `feign-okhttp` |
+| Apache HttpClient | `PoolingHttpClientConnectionManager` | 可配置最大连接数、每路由连接数 | ❌ 需引入 `feign-httpclient` |
+
+**工作流程**：
+1. 首次请求 → 检查连接池中是否有到目标 IP:Port 的空闲连接
+2. 有 → 取出复用；无 → 新建 TCP 连接
+3. 请求完成 → 连接归还连接池（不关闭），等待下次复用
+4. 超过空闲超时 → 连接被关闭释放
+
+#### HTTP/1.1 vs HTTP/2 的并发模型差异
+
+虽然都能复用连接，但**并发能力**有本质区别：
+
+| 维度 | HTTP/1.1 Keep-Alive | HTTP/2 |
+| :--- | :--- | :--- |
+| **并发模型** | 串行，队头阻塞 | 多路复用，并发无阻塞 |
+| **同一连接并发请求** | ❌ 一个请求未响应完，后续必须等待 | ✅ 多个请求并发处理 |
+| **头部压缩** | ❌ 无 | ✅ HPACK 压缩 |
+| **OpenFeign 默认支持** | ✅ 是 | ❌ 需显式配置 |
+
+> 💡 **性能影响举例**：如果每个请求耗时 100ms，同时发 10 个请求到同一实例：
+> - **HTTP/1.1**：≈ 1000ms（串行排队）
+> - **HTTP/2**：≈ 100ms（并发处理）
+> 
+> 这就是为什么高并发场景推荐升级到 HTTP/2 或使用 WebClient + Reactor Netty。
+
+#### 深入理解：队头阻塞 vs Dubbo 多路复用
+
+这是一个高频误区：很多人认为"HTTP 队头阻塞是因为 IO 线程和业务线程没分离"。**这是错误的**。队头阻塞是**协议层面的约束**，与服务端的线程模型无关。
+
+##### 常见误区澄清
+
+| 误解 | 事实 |
+| :--- | :--- |
+| "HTTP 服务端 IO/业务线程是同一个" | ❌ Spring Boot 嵌入式 Tomcat/Undertow/Netty **都有 IO 与业务线程分离** |
+| "队头阻塞是因为服务端线程没分离" | ❌ 队头阻塞是 **HTTP/1.1 协议规范**导致的，与线程模型无关 |
+| "Dubbo 多路复用是因为用了 Netty" | ⚠️ Netty 提供了 IO 分离基础，但**真正的多路复用来自 Dubbo 协议的 Request ID 设计** |
+
+##### 队头阻塞的真正原因
+
+HTTP/1.1 规范要求：**同一连接上，请求和响应必须严格有序**。第 N 个响应必须对应第 N 个请求，不能乱序返回。
+
+```
+【HTTP/1.1 - 同一条 TCP 连接】
+Consumer:  请求A ──► [等待响应A] ──► 请求B ──► [等待响应B] ──► 请求C
+Provider:  处理A                    处理B                    处理C
+           ↑ IO/业务线程已分离       ↑ IO/业务线程已分离
+Consumer:  ◄── 响应A               ◄── 响应B               ◄── 响应C
+           ↑ 必须等A回来才能发B     ↑ 必须等B回来才能发C
+```
+
+即使 Provider 端用了和 Netty 一样的 IO/业务分离架构，Consumer 端仍然必须**串行发送、串行接收**。瓶颈不在服务端处理能力，而在**协议本身的有序性约束**。
+
+##### Dubbo 多路复用的真正原因
+
+Dubbo 协议设计了 **8 字节 Request ID**，每个请求携带唯一标识，响应也携带相同的 ID。这使得响应可以**乱序返回**，Consumer 通过 ID 匹配请求与响应。
+
+```
+【Dubbo - 同一条 TCP 连接】
+Consumer:  请求A(ID=1) ──► 请求B(ID=2) ──► 请求C(ID=3) ──► (连续发出，不等响应)
+Provider:  处理A          处理B          处理C              (业务线程池并发处理)
+Consumer:  ◄── 响应B(ID=2) ◄── 响应A(ID=1) ◄── 响应C(ID=3)  (乱序返回，通过 ID 匹配)
+```
+
+##### 核心对比总结
+
+| 维度 | HTTP/1.1 | Dubbo |
+| :--- | :--- | :--- |
+| **协议设计** | 请求-响应严格有序 | Request ID 允许乱序匹配 |
+| **Consumer 端行为** | 发完请求必须等响应才能发下一个 | 发完请求立即发下一个，不阻塞 |
+| **Provider 端线程模型** | IO/业务分离（Tomcat/Netty） | IO/业务分离（Netty） |
+| **瓶颈位置** | **协议层**（有序性约束） | **无协议层瓶颈** |
+| **单连接并发能力** | 1（串行） | N（并发，受限于业务线程池） |
+
+> 🎯 **一句话总结**：队头阻塞是**协议问题**，不是线程模型问题。Dubbo 的多路复用能力来自**协议层的 Request ID 设计**，而非仅仅因为用了 Netty。HTTP/2 通过 Stream 机制打破了 HTTP/1.1 的有序性约束，才在协议层面实现了真正的多路复用。
+
+#### Dubbo vs Spring Cloud 连接模型对比
+
+| 维度 | Dubbo | Spring Cloud (HTTP/1.1) | Spring Cloud (HTTP/2) |
+| :--- | :--- | :--- | :--- |
+| **同 IP:Port 复用** | ✅ Request ID 多路复用 | ✅ Keep-Alive（串行） | ✅ Stream 多路复用 |
+| **跨 IP 复用** | ❌ 不可能 | ❌ 不可能 | ❌ 不可能 |
+| **并发能力** | 高（原生多路复用） | 低（队头阻塞） | 高（Stream 并发） |
+| **协议开销** | 16 字节头 + 二进制 | 数百字节头 + 文本 | 压缩头 + 二进制帧 |
+| **生产连接数（10服务×5实例）** | 50 条 | 50 条 | 50 条 |
+
+> 🎯 **关键结论**：
+> 1.  **连接数量相同**：无论 Dubbo 还是 Spring Cloud，生产环境下连接数都 ≈ 服务数 × 实例数，这是 TCP 协议的物理约束
+> 2.  **单连接效率不同**：Dubbo 原生多路复用 + 二进制协议，单连接吞吐远高于 HTTP/1.1；HTTP/2 可接近 Dubbo，但需额外配置
+> 3.  **Spring Cloud 的优势不在连接复用**：而在生态集成、RESTful 友好性、前后端统一协议等方面
+
+> 🎯 **面试话术**："Spring Cloud 底层 HTTP 客户端通过连接池 + Keep-Alive 实现同 IP:Port 的 TCP 连接复用，不会为同一实例的多次调用重复建连。但与 Dubbo 的核心区别在于并发模型：HTTP/1.1 是串行的，存在队头阻塞；Dubbo 通过 Request ID 实现真正的多路复用，同一连接上可并发处理多个请求。因此同等连接数下，Dubbo 的连接利用率和吞吐量显著更高。如需提升 Spring Cloud 性能，可升级到 HTTP/2 或切换到 WebClient + Reactor Netty。"
+
 ### 服务注册：Provider 端配置
 
 在 Spring Cloud 中，**服务注册和服务发现用的是同一套 `nacos.discovery` 配置**（不像 Dubbo 那样 provider/consumer 分开配置）。当一个服务引入 `spring-cloud-starter-alibaba-nacos-discovery` 依赖并启动时，它会**自动将自己注册到 Nacos**，无需额外代码。
@@ -299,8 +418,8 @@ spring:
           version: v2
           region: cn-hangzhou
         ephemeral: true                    # 临时实例（默认 true，心跳检测）
-        heart-beat-interval: 5000          # 心跳间隔（ms）
-        heart-beat-timeout: 30000          # 心跳超时（ms），超时标记不健康
+        heart-beat-interval: 5000          # 心跳间隔（ms），默认 5000
+        heart-beat-timeout: 30000          # 心跳超时（ms），默认 15000，超时标记不健康；摘除阈值约为 interval×3（默认 30000）
         register-enabled: true             # 是否注册到 Nacos（默认 true）
       username: nacos                      # ⭐️ Nacos 用户名（开启鉴权时必填，放在 nacos 节点下）
       password: nacos123                   # ⭐️ Nacos 密码（开启鉴权时必填，放在 nacos 节点下）
@@ -347,8 +466,8 @@ spring:
           region: cn-hangzhou
         watch:
           enabled: true                    # 开启服务变更监听（默认 true）
-        heart-beat-timeout: 30000          # 心跳超时时间（ms），超时标记不健康
-        heart-beat-interval: 5000          # 心跳间隔（ms）
+        heart-beat-timeout: 30000          # 心跳超时（ms），默认 15000，超时标记不健康；摘除阈值约为 interval×3（默认 30000）
+        heart-beat-interval: 5000          # 心跳间隔（ms），默认 5000
         fail-fast: false                   # 启动时 Nacos 不可用是否快速失败
       username: nacos                      # ⭐️ Nacos 用户名（开启鉴权时必填，放在 nacos 节点下）
       password: nacos123                   # ⭐️ Nacos 密码（开启鉴权时必填，放在 nacos 节点下）
@@ -564,3 +683,119 @@ Nacos OpenAPI: GET /nacos/v1/ns/instance/list?serviceName=user-service
 ```
 
 > 💡 **一句话总结**：Spring Cloud 通过 **Commons 定义接口 + Starter 提供实现 + AutoConfiguration 自动装配** 三层架构，实现了注册中心的可插拔设计。业务开发者只需关注"用什么注册中心"，无需关心"怎么注册、怎么发现"——这些全部由 Starter 的自动装配在启动时完成。这也是 Spring Cloud 相比 Dubbo 在易用性上的核心优势之一。
+
+---
+
+## 面试高频问题速查
+
+### Q1：Nacos 临时实例的心跳机制是怎样的？心跳不响应会被摘除吗？
+
+**答**：会。Nacos 临时实例（`ephemeral: true`，默认）采用**客户端主动上报心跳 + 服务端被动检测**的双重机制，心跳停止后实例会被逐步标记不健康直至摘除。
+
+#### 完整生命周期
+
+```
+服务启动 → SmartLifecycle.start() → NacosServiceRegistry.register()
+    ↓
+注册成功（POST /nacos/v1/ns/instance）
+    ↓
+启动 BeatReactor 心跳线程（默认每 5 秒发送一次心跳）
+    ↓
+Nacos Server 收到心跳 → 更新 lastBeatTime → 重置健康状态
+    ↓
+若超过 heart-beat-timeout（默认 15s）未收到心跳 → 标记为不健康（healthy=false）
+    ↓
+若超过 heart-beat-interval × 3（默认 30s）仍未收到心跳 → 从实例列表中摘除
+    ↓
+服务恢复后重新发送心跳 → Nacos 自动恢复实例（无需重新注册）
+```
+
+#### 关键参数与默认值
+
+| 参数 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `heart-beat-interval` | 5000ms | 客户端心跳发送间隔 |
+| `heart-beat-timeout` | 15000ms | 服务端判定不健康的阈值 |
+| 摘除阈值 | 30000ms | 约为 `interval × 3`，超过此时间未收到心跳则摘除 |
+
+#### 原理要点
+
+- **心跳是注册之后才启动的**：先完成注册拿到实例身份，再由 `BeatReactor` 定时发送心跳维持存活。注册和心跳是两个独立步骤。
+- **临时实例 vs 持久实例**：临时实例依赖心跳，宕机自动摘除；持久实例（`ephemeral: false`）不依赖心跳，适合 DNS/网关等基础设施服务，宕机后不会自动摘除，需手动下线。
+- **Nacos 2.x 优化**：2.x 使用 gRPC 长连接替代 HTTP 短轮询心跳，连接断开即视为实例下线，检测延迟从秒级降至毫秒级。
+
+> 🎯 **面试话术**："Nacos 临时实例注册成功后，客户端通过 BeatReactor 每 5 秒发送一次心跳。服务端 15 秒未收到心跳标记不健康，30 秒未收到则从实例列表摘除。服务恢复后心跳自动续上，实例会自动恢复。Nacos 2.x 改用 gRPC 长连接，连接断开即感知下线，比 1.x 的 HTTP 心跳检测更快。"
+
+### Q2：注册中心挂了，Spring Cloud 微服务之间还能互相调用吗？
+
+**答**：**短期内可以，长期不行**。这得益于 Spring Cloud LoadBalancer 的**本地缓存机制**。
+
+#### 分阶段影响分析
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    注册中心宕机后的影响                        │
+├──────────────┬──────────────────────────────────────────────┤
+│  阶段         │  表现                                        │
+├──────────────┼──────────────────────────────────────────────┤
+│ 0~30s        │ ✅ 完全正常。Consumer 本地缓存了实例列表，      │
+│              │    LoadBalancer 直接从缓存选择实例发起调用       │
+├──────────────┼──────────────────────────────────────────────┤
+│ 30s~数分钟    │ ⚠️ 逐渐退化。新上线/下线的实例无法感知，       │
+│              │    缓存中的实例可能已不可用，调用开始失败        │
+├──────────────┼──────────────────────────────────────────────┤
+│ 长时间宕机    │ ❌ 严重故障。缓存过期且无法刷新，              │
+│              │    新服务无法注册，已有服务的实例变更无法同步     │
+└──────────────┴──────────────────────────────────────────────┘
+```
+
+#### 本地缓存原理
+
+Spring Cloud LoadBalancer 底层通过 `ServiceInstanceListSupplier` 获取实例列表，该 Supplier 内置了**多级缓存**：
+
+1. **内存缓存**：`CachingServiceInstanceListSupplier` 将查询结果缓存在内存中，后续请求直接返回缓存，避免频繁访问注册中心。
+2. **定时刷新**：默认每 30 秒向注册中心拉取最新实例列表并更新缓存。注册中心不可用时，刷新失败但**不会清除旧缓存**，继续使用上次成功的实例列表。
+3. **事件驱动更新**：Nacos 支持推送模式（2.x gRPC 长连接），实例变更时主动通知 Consumer 更新缓存，不完全依赖定时拉取。
+
+```java
+// 简化版缓存逻辑伪代码
+public class CachingServiceInstanceListSupplier {
+    private List<ServiceInstance> cachedInstances;
+    
+    public List<ServiceInstance> get() {
+        try {
+            // 尝试从注册中心刷新
+            cachedInstances = delegate.get();
+        } catch (Exception e) {
+            // 刷新失败 → 保留旧缓存，不抛异常
+            log.warn("Failed to refresh instances, using cache");
+        }
+        return cachedInstances; // 始终返回可用数据
+    }
+}
+```
+
+#### 生产环境的容灾建议
+
+| 措施 | 说明 |
+| :--- | :--- |
+| **Nacos 集群部署** | 至少 3 节点，单点故障不影响服务 |
+| **开启本地缓存兜底** | Spring Cloud LoadBalancer 默认已开启，确保不要禁用 |
+| **配置重试与熔断** | 配合 Sentinel / Resilience4j，缓存命中但实例不可用时快速失败 |
+| **监控告警** | 注册中心可用性纳入核心监控指标，宕机第一时间告警 |
+
+> 🎯 **面试话术**："注册中心短暂宕机不影响服务调用，因为 Spring Cloud LoadBalancer 有本地缓存机制。Consumer 会把实例列表缓存在内存中，注册中心不可用时继续使用旧缓存。但缓存不会无限期有效，长时间宕机会导致实例列表过时、新服务无法注册。所以生产环境必须做 Nacos 集群部署 + 熔断兜底，不能依赖缓存解决所有问题。"
+
+---
+
+## 小结
+
+本篇覆盖了 Spring Cloud Alibaba 微服务调用的核心链路：
+
+- **服务调用**：OpenFeign 声明式客户端 + Spring Cloud LoadBalancer 负载均衡
+- **服务注册与发现**：Nacos 临时实例心跳机制、自动装配流程
+- **配置中心**：Nacos 动态配置、`@RefreshScope` 刷新原理
+- **网关与负载均衡的关系**：Gateway 是 LoadBalancer 的消费者，两者协作而非替代
+- **容灾能力**：注册中心宕机时的本地缓存兜底机制
+
+> 💡 **学习建议**：理解 Spring Cloud 的关键是抓住 **"Commons 接口 + Starter 实现 + AutoConfiguration 装配"** 这个三层架构。掌握了这个设计模式，切换注册中心、负载均衡器、配置中心都只需要换 Starter，业务代码零改动。

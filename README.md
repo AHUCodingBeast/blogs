@@ -14,7 +14,7 @@
 - [Spring Cloud Gateway 核心要点](web框架/SpringCloud-Gateway-Notes.md)
 - [服务雪崩防护：限流、熔断与降级](web框架/Service-Protection-Notes.md)
 - 分布式消息队列 Kafka 与 RocketMQ
-- Spring 的依赖注入实现与循环依赖问题
+- Spring 的依赖注入实现原理
 - Spring Bean 的生命周期
 
 ## Java基础
@@ -43,7 +43,7 @@
 - 常用的几种设计模式考察
 - 幂等、最终一致性
 - 防重放与接口签名设计
-- JWT 技术原理与单点登录
+- JWT 技术原理与单点登录（SA-token技术方案介绍）
 - 分库分表
 - 库存超卖问题解决
 - Redis与Mysql双写一致性（延迟双删）
@@ -62,7 +62,8 @@
 - RNN与CNN基础面试题（如何使用 Pytorch 搭建一个简单的神经网络）
 - 注意力机制与多头注意力机制
 - AI 智能体开发框架（SpringAI、LangGraph）
--  RAG 技术向量数据库学习
+- RAG 技术向量数据库学习
+- [AI 编程方法论：如何让 AI 写出高质量代码](AI编程/AI-Programming-Notes.md)
 
 
 # 优秀文章链接
