@@ -13,19 +13,23 @@
 - [SpringCloud 全家桶](web框架/SpringCloud-Core-Notes.md)
 - [Spring Cloud Gateway 核心要点](web框架/SpringCloud-Gateway-Notes.md)
 - [服务雪崩防护：限流、熔断与降级](web框架/Service-Protection-Notes.md)
-- 分布式消息队列 Kafka 与 RocketMQ
+- [事件机制、发布订阅、状态机设计](web框架/Event-PubSub-Notes.md)
+- [分布式消息队列：Kafka 与 RocketMQ 核心原理与实战](web框架/MQ-Kafka-RocketMQ-Notes.md)
 - Spring 的依赖注入实现原理
 - Spring Bean 的生命周期
 
 ## Java基础
 
-- Java 锁机制与常用异步工具
-- 线程池
-- AQS技术实现细节
-- ThreadLocal实现细节
-- JVM 与垃圾回收
-- HashMap 集合常问问题
-- 类加载机制
+- Java 锁机制：synchronized、ReentrantLock、volatile、CAS
+- Java 内存模型（JMM）：happens-before、可见性、有序性
+- 常用异步工具：CompletableFuture、ForkJoinPool、虚拟线程
+- 线程池：核心参数、拒绝策略、生产配置实践
+- AQS 原理：CLH 队列、state、Condition
+- ThreadLocal 原理：内存泄漏、InheritableThreadLocal、TTL
+- JVM 内存模型与垃圾回收：GC 算法、收集器、调优实战
+- 集合框架：HashMap 底层、ConcurrentHashMap、ArrayList vs LinkedList
+- 类加载机制：双亲委派、打破双亲委派、SPI
+- 反射与动态代理：JDK Proxy vs CGLIB、Spring AOP 底层
 
 ## 数据库
 
@@ -35,34 +39,42 @@
 
 ## 运维
 
-- Docker 常问面试题
-- K8s 集群常问概念
+- Linux 基础：常用命令、权限、进程管理、日志排查
+- Docker 核心原理与常用命令
+- K8s 核心概念：Pod、Service、Deployment、ConfigMap
+- 阿里云部署架构实战：VPC、ALB、网关、K8s 集群、出入网配置从零搭建
 
 ## 方案设计
 
-- 常用的几种设计模式考察
-- 幂等、最终一致性
-- 防重放与接口签名设计
-- JWT 技术原理与单点登录（SA-token技术方案介绍）
-- 分库分表
-- 库存超卖问题解决
-- Redis与Mysql双写一致性（延迟双删）
-- 分布式系统常问问题（CAP 理论，分布式共识算法，分布式 ID 生成）
-- 限流、熔断、降级
+- 分布式理论基础：CAP、BASE、共识算法（Raft/Paxos）
+- 分布式 ID 生成：Snowflake、Leaf、数据库号段模式
+- 常用设计模式：策略、模板方法、观察者、责任链
+- 幂等设计与最终一致性保障
+- 接口安全：防重放、签名验证、HTTPS
+- 认证授权：JWT 原理、SSO 单点登录、SA-Token 实践
+- 分库分表：ShardingSphere、垂直/水平拆分、数据迁移
+- 高并发库存扣减：Redis 预扣、数据库乐观锁、Lua 原子操作
+- 缓存一致性：Cache Aside、延迟双删、Binlog 订阅
 
 ## 计算机网络基础
 
-- netty 
-- 计算机网络常问概念（三次握手、拥塞控制、OSI 模型、零拷贝、IO 多路复用）
+- TCP 与 UDP：区别、可靠传输、流量控制与拥塞控制
+- HTTP/HTTPS：协议演进、TLS 握手、常见状态码与缓存机制
+- Netty 核心原理：Reactor 模型、零拷贝、内存池
+
+## 操作系统
+- 用户态与内核态、系统调用
+- IO 模型：BIO/NIO/AIO 与 IO 多路复用
+- 内存管理：虚拟内存、分页分段、页面置换
 
 
 # AI相关
 
-- 机器学习面试常问
-- RNN与CNN基础面试题（如何使用 Pytorch 搭建一个简单的神经网络）
-- 注意力机制与多头注意力机制
-- AI 智能体开发框架（SpringAI、LangGraph）
-- RAG 技术向量数据库学习
+- Transformer 与 LLM 基础：Tokenization、推理优化、Function Calling
+- Prompt Engineering：系统提示词设计、Few-shot、CoT 思维链
+- RAG 实战：Embedding、向量检索、Chunking 策略、混合搜索
+- AI Agent 开发：Spring AI、LangChain/LangGraph、Tool Use
+- LLM 应用架构：流式输出、Token 计费、缓存策略、安全护栏
 - [AI 编程方法论：如何让 AI 写出高质量代码](AI编程/AI-Programming-Notes.md)
 
 
