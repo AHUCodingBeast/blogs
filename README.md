@@ -39,10 +39,10 @@
 
 ## 运维
 
-- Linux 基础：常用命令、权限、进程管理、日志排查
-- Docker 核心原理与常用命令
-- K8s 核心概念：Pod、Service、Deployment、ConfigMap
-- 阿里云部署架构实战：VPC、ALB、网关、K8s 集群、出入网配置从零搭建
+- [Linux 基础：研发日常速查手册（常用命令、权限、进程管理、日志排查）](运维/Linux-Basics-Notes.md)
+- [Docker 核心原理与常用命令（含 Docker Compose）](运维/Docker-Core-Notes.md)
+- [K8s 核心概念：研发视角速查手册（Pod、Deployment、Service、ConfigMap、Ingress、HPA）](运维/K8s-Core-Concepts-Notes.md)
+- [阿里云部署架构实战：VPC、ALB、网关、K8s 集群、出入网配置从零搭建](运维/Aliyun-Deployment-Architecture-Notes.md)
 
 ## 方案设计
 
@@ -68,7 +68,7 @@
 - 内存管理：虚拟内存、分页分段、页面置换
 
 
-# AI相关
+## AI相关
 
 - Transformer 与 LLM 基础：Tokenization、推理优化、Function Calling
 - Prompt Engineering：系统提示词设计、Few-shot、CoT 思维链

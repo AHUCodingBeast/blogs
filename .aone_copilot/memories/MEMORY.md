@@ -1,2 +1,3 @@
 - [笔记撰写必须基于最新官方文档](feedback_latest_docs.md) — 所有博客笔记必须基于最新版本官方文档，禁止过时内容
 - [博客笔记写作风格与结构调整范式](feedback_writing_style.md) — 原理/代码/对比分离，线性阅读路径，初始可松散、最终按范式重组
+- [复杂概念用图表辅助理解](feedback_use_diagrams.md) — 解释复杂概念时主动画 Mermaid 图辅助理解，降低认知负荷
