@@ -24,12 +24,15 @@
 | 命令 | 用途 | 研发高频用法 |
 | :--- | :--- | :--- |
 | `grep -rn "keyword" /path` | 递归搜索 + 显示行号 | ⭐️ 代码/日志关键词搜索 |
+| `grep -rn "keyword" /path -C 5` | 匹配行前后各 5 行上下文 | ⭐️ 日志排查看调用链/堆栈 |
 | `grep -v "exclude" file` | 反向匹配（排除） | 过滤无关日志行 |
 | `awk '{print $1, $5}' file` | 按列提取 | 分析日志字段 |
 | `sort \| uniq -c \| sort -rn` | 统计词频 Top N | 分析错误日志分布 |
 | `sed 's/old/new/g' file` | 批量替换 | 配置文件修改 |
 | `wc -l file` | 统计行数 | 确认日志量级 |
 | `head -n 100 / tail -n 100` | 查看文件头/尾 | 快速预览大文件 |
+
+> 💡 **awk 速记**：awk（Aho-Weinberger-Kernighan）是 Unix 下最强的按列处理器。字段序号从 `$1` 开始，`$0` 表示整行，`$NF` 表示最后一列。默认以空白符分列，`-F','` 可改为逗号分隔。研发高频用法：`awk '{print $1}'` 提取 IP、`awk '$9>=400'` 过滤错误请求、`awk '{count[$1]++} END {for(k in count) print count[k],k}'` 分组计数。比 `cut` 灵活，比 `sed` 直观，日志分析首选。
 
 ### 网络诊断
 

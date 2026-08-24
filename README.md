@@ -50,11 +50,15 @@
 - 分布式 ID 生成：Snowflake、Leaf、数据库号段模式
 - 常用设计模式：策略、模板方法、观察者、责任链
 - 幂等设计与最终一致性保障
-- 接口安全：防重放、签名验证、HTTPS
-- 认证授权：JWT 原理、SSO 单点登录、SA-Token 实践
+- [接口安全：防重放、签名验证与 HTTPS](方案设计/API-Security-Notes.md)
+- [认证授权：RBAC、JWT、SSO 与框架实践](web框架/Auth-RBAC-JWT-SSO-Notes.md)
+- [跨域问题分析与解决方案（CORS vs CSRF、Nginx 反向代理）](方案设计/Cross-Origin-Analysis-Solutions.md)
 - 分库分表：ShardingSphere、垂直/水平拆分、数据迁移
 - 高并发库存扣减：Redis 预扣、数据库乐观锁、Lua 原子操作
 - 缓存一致性：Cache Aside、延迟双删、Binlog 订阅
+- [微信小程序登录流程与手机号获取（wx.login、code2Session、getPhoneNumber）](方案设计/WeChat-MiniProgram-Login-Notes.md)
+- [微信支付 JSAPI 支付流程详解（统一下单、回调通知、V3 签名）](方案设计/WeChat-Pay-JSAPI-Notes.md)
+
 
 ## 计算机网络基础
 
