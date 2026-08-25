@@ -572,20 +572,7 @@ public ResponseEntity<?> payscoreNotify(HttpServletRequest request) {
 
 微信为了保证通知送达，会在商户未返回 200 OK 时按 15s/30s/3m/10m/20m/1h/2h/6h/15h 的频率重试。如果商户处理成功但响应超时，微信会再次发送相同通知。不做幂等就会导致重复发货、重复充值。正确做法是：先检查订单状态，已处理则直接返回 200，未处理才执行业务逻辑。
 
-### Q4：V2 和 V3 接口有什么区别？
-
-| 维度 | V2 | V3 |
-| :--- | :--- | :--- |
-| 签名算法 | MD5 / HMAC-SHA256 | RSA-SHA256 |
-| 通信格式 | XML | JSON |
-| 回调加密 | 无 | AES-256-GCM |
-| 证书管理 | 双向证书 | 公钥/私钥对 |
-| 安全性 | 较低 | ⭐️ 推荐 |
-| 状态 | 逐步废弃 | 当前标准 |
-
-> 💡 **新项目必须用 V3**，V2 已逐步下线。
-
-### Q5：用户下单后一直不付钱怎么办？
+### Q4：用户下单后一直不付钱怎么办？
 
 这是支付系统最经典的超时问题。微信不会主动通知"用户没付钱"，商户必须自己设计兜底机制。我们采用**三层防护**：
 
@@ -603,7 +590,7 @@ public ResponseEntity<?> payscoreNotify(HttpServletRequest request) {
 
 > 💡 **核心原则**：**微信只管支付通道，业务状态管理和资源清理是商户的责任**。
 
-### Q6：你在设计支付系统时，一般设计了哪些定时任务？主要作用是什么？
+### Q5：你在设计支付系统时，一般设计了哪些定时任务？主要作用是什么？
 
 支付系统的定时任务是**保障数据最终一致性和资源及时回收**的关键基础设施。我们设计了以下 4 类定时任务：
 
@@ -623,56 +610,152 @@ public ResponseEntity<?> payscoreNotify(HttpServletRequest request) {
 
 > 💡 **核心认知**：定时任务是支付系统的"**安全网**"。回调通知是主路径，定时任务是兜底路径。两者配合才能保证"**不漏单、不错单、不丢钱**"。
 
-### Q7：微信支付分和 JSAPI 支付有什么区别？
+### Q6：微信支付分和 JSAPI 支付有什么区别？
 
 JSAPI 支付是"**先付后用**"，用户下单时立即完成支付；支付分是"**先用后付**"，用户授权后先享受服务，服务结束后系统自动扣款。JSAPI 适用于电商、充值等即时交易场景；支付分适用于租赁、出行、住宿等需要信用担保的场景。两者的接口完全不同：JSAPI 用 `/v3/pay/transactions/jsapi`，支付分用 `/v3/payscore/serviceorder`。
 
-### Q8：支付分的扣款失败了怎么办？
+### Q7：支付分的扣款失败了怎么办？
 
 微信会在用户账户余额充足时自动重试扣款，商户需监听 `PAYSCORE.USER_REPAID` 事件处理补扣成功的情况。如果长期扣款失败，商户可通过催收接口提醒用户，或根据业务规则限制用户后续使用。同时，支付分会记录用户的履约行为，恶意拖欠会影响用户的支付分评分。
 
-### Q9：用户在服务过程中关闭了支付分授权，怎么处理？
+### Q8：充电场景中用户中途取消支付分授权，如何正确处理服务订单与手动支付的衔接？
 
-这是支付分特有的风控场景，本质是**信用担保中途失效**。我们采用**三层防护**：
+这是一个真实的踩坑场景：用户开启支付分授权后开始充电，充电过程中取消了授权。如果处理不当，会导致**支付分服务订单卡死 + 手动支付订单与服务订单无关联**的数据不一致问题。
+
+#### ❌ 错误做法（我们曾经踩过的坑）
+
+| 步骤 | 错误做法 | 后果 |
+| :--- | :--- | :--- |
+| 取消授权时 | 没做处理，等服务自然结束 | 服务订单仍在"进行中"，但信用担保已失效 |
+| 充电完成后 | 调用 complete 接口 | 微信拒绝完结，因为授权已取消 |
+| 转手动支付 | 调用统一下单创建新订单 | 新订单与原服务订单**无关联**，两笔独立订单 |
+| 最终结果 | 一笔卡住的支付分订单 + 一笔无关联的 JSAPI 订单 | 数据不一致，对账困难 |
+
+#### ✅ 正确设计方案
 
 ```mermaid
 graph TB
-    A["微信发送 PAYSCORE.USER_CANCEL 回调"] --> B{"服务是否已结束？"}
-    B -->|是| C["正常完结订单<br/>尝试自动扣款"]
-    B -->|否| D["① 实时拦截：冻结服务<br/>（停止计费/锁定设备）"]
-    D --> E["② 引导恢复：弹窗提示<br/>+ 一键重新授权"]
-    E --> F{"用户是否重新授权？"}
-    F -->|是| G["恢复服务<br/>继续正常使用"]
-    F -->|否/超时5min| H["③ 兜底追偿：强制结束服务"]
-    H --> I["按已消费金额生成待支付账单"]
-    I --> J["转入手动支付流程<br/>（JSAPI/H5支付）"]
-    J --> K["推送催付消息"]
-    K --> L{"72h内是否支付？"}
-    L -->|是| M["更新订单为已支付"]
-    L -->|否| N["转人工催收<br/>+ 上报微信违约记录"]
+    A["用户取消支付分授权"] --> B["收到 PAYSCORE.USER_CANCEL 回调"]
+    B --> C["① 立即冻结充电服务<br/>（停止计费/锁定充电桩）"]
+    C --> D["② 按已消费金额调用 complete<br/>（即使授权取消仍可完结已产生费用）"]
+    D --> E{"complete 成功？"}
+    E -->|是| F["微信尝试自动扣款<br/>（余额/风险金）"]
+    E -->|否| G["③ 创建手动支付订单<br/>out_trade_no = 原订单号_MANUAL"]
+    G --> H["调用 JSAPI 统一下单"]
+    H --> I["用户手动支付"]
+    I --> J["支付回调成功后<br/>同步更新原服务订单状态"]
     
-    style D fill:#fff3e0,stroke:#ff9800
-    style E fill:#e8f5e9,stroke:#4caf50
-    style H fill:#ffebee,stroke:#f44336
-    style J fill:#e3f2fd,stroke:#2196f3
-    style N fill:#ffebee,stroke:#f44336
+    K["⚠️ 关键：手动支付订单必须<br/>通过命名规则+数据库字段<br/>与原服务订单关联"] --> G
+    
+    style C fill:#fff3e0,stroke:#ff9800
+    style D fill:#e8f5e9,stroke:#4caf50
+    style G fill:#e3f2fd,stroke:#2196f3
+    style K fill:#ffebee,stroke:#f44336
 ```
 
-**① 实时拦截**：收到微信 `PAYSCORE.USER_CANCEL` 回调后，立即冻结服务（停止计费、锁定设备），防止损失扩大。从收到回调到冻结应 < 1s。
+#### 三步正确处理流程
 
-**② 引导恢复**：前端弹窗提示"授权已关闭，请重新授权以继续使用"，提供一键重新授权入口。大部分用户是误操作，引导后可恢复正常服务。同时启动定时任务，5 分钟后检查是否重新授权。
+**第一步：取消授权时立即冻结 + 尝试完结**
 
-**③ 兜底追偿**：若用户拒绝重新授权或超时未恢复 → 强制结束服务 → 按已消费金额生成待支付账单 → **转入手动支付流程（JSAPI/H5支付）** → 推送催付消息 → 72 小时内未支付则转人工催收 + 上报微信支付分违约记录。
+> ⚠️ **关键认知**：即使用户取消了授权，**仍然可以调用 complete 接口完结已产生的费用**。微信会尝试从用户余额或风险金中扣款。只有扣款失败时才需要转手动支付。**不要等充电结束再调 complete！**
 
-> 💡 **关于"生成账单转手动支付"**：这里的账单不是独立的财务凭证，而是一个**普通支付订单**。系统会调用 JSAPI 统一下单接口（或 H5 支付接口）创建一笔新的支付订单，金额等于已消费但未扣款的部分。用户通过短信/小程序消息收到支付链接后，像普通购物一样完成支付。这笔订单与原来的支付分服务订单关联，支付成功后原服务订单状态同步更新为已支付。
+```java
+// 收到 PAYSCORE.USER_CANCEL 回调时
+if ("PAYSCORE.USER_CANCEL".equals(eventType)) {
+    PayscoreOrder order = payscoreOrderService.findByOutOrderNo(outOrderNo);
+    
+    // ① 立即冻结充电服务
+    chargingService.freeze(order.getDeviceId());
+    
+    // ② 按已消费金额尝试完结（不是等充电结束！）
+    long consumedAmount = chargingService.getConsumedAmount(order.getDeviceId());
+    if (consumedAmount > 0) {
+        try {
+            wxPayService.completePayscoreOrder(outOrderNo, consumedAmount);
+            // 微信会自动尝试扣款，等待扣款回调
+        } catch (Exception e) {
+            // complete 失败，转手动支付流程
+            createManualPayOrder(order, consumedAmount);
+        }
+    } else {
+        // 未产生费用，直接取消服务订单
+        wxPayService.cancelPayscoreOrder(outOrderNo);
+    }
+}
+```
 
-**关键细节**：
-- **不要直接关单**：取消授权 ≠ 放弃服务，先冻结再引导，避免误伤正常用户
-- **保留证据**：记录取消时间、已消费金额、冻结时间点，用于纠纷处理
-- **合规催收**：催付频率不能过高，避免被投诉；超时后走正规催收流程
-- **天然风控**：恶意拖欠会被微信记录违约，影响用户后续使用支付分，这是平台级的信用约束
+**第二步：手动支付订单必须与原服务订单关联**
 
-> 💡 **核心原则**：**冻结止损 → 引导恢复 → 兜底追偿（转手动支付）**，三步递进，既保障商户权益，又给用户纠错机会。
+```java
+private void createManualPayOrder(PayscoreOrder payscoreOrder, long amount) {
+    // ✅ 关键：新订单号与原服务订单关联
+    String manualOutTradeNo = payscoreOrder.getOutOrderNo() + "_MANUAL";
+    
+    WxPayOrder manualOrder = new WxPayOrder();
+    manualOrder.setOutTradeNo(manualOutTradeNo);
+    manualOrder.setTotalAmount(amount);
+    manualOrder.setDescription("充电费用（支付分转手动支付）");
+    manualOrder.setRelatedPayscoreOrderNo(payscoreOrder.getOutOrderNo()); // ⭐️ 关联字段
+    manualOrder.setStatus("WAIT_PAY");
+    wxPayOrderMapper.insert(manualOrder);
+    
+    String prepayId = wxPayService.unifiedOrder(manualOrder);
+    // 返回支付参数给前端...
+}
+```
+
+**第三步：手动支付成功后同步更新原服务订单**
+
+```java
+// JSAPI 支付回调处理中
+if (outTradeNo.endsWith("_MANUAL")) {
+    String payscoreOrderNo = outTradeNo.replace("_MANUAL", "");
+    
+    // 更新原支付分服务订单状态
+    payscoreOrderService.markAsPaidByManual(payscoreOrderNo, transactionId);
+    
+    // 更新手动支付订单状态
+    wxPayOrderService.markAsPaid(outTradeNo, transactionId);
+}
+```
+
+#### 数据库设计建议
+
+```sql
+-- 支付分服务订单表
+CREATE TABLE payscore_order (
+    out_order_no VARCHAR(64) PRIMARY KEY,
+    service_status VARCHAR(20),       -- ONGOING/FROZEN/COMPLETED/CANCELLED
+    auth_status VARCHAR(20),          -- AUTHORIZED/CANCELLED
+    consumed_amount BIGINT,           -- 已消费金额（分）
+    pay_method VARCHAR(20),           -- PAYSCORE/MANUAL ⭐️ 记录最终支付方式
+    manual_pay_order_no VARCHAR(64),  -- 关联的手动支付订单号 ⭐️
+    created_at DATETIME,
+    updated_at DATETIME
+);
+
+-- JSAPI 支付订单表
+CREATE TABLE wx_pay_order (
+    out_trade_no VARCHAR(64) PRIMARY KEY,
+    related_payscore_order_no VARCHAR(64), -- 关联的支付分订单号 ⭐️
+    total_amount BIGINT,
+    status VARCHAR(20),
+    transaction_id VARCHAR(64),
+    created_at DATETIME
+);
+```
+
+#### ⚠️ 错误 vs 正确对照表
+
+| 维度 | ❌ 错误做法 | ✅ 正确做法 |
+| :--- | :--- | :--- |
+| 取消授权时 | 不处理，等服务结束 | 立即冻结 + 尝试 complete 已消费金额 |
+| 完结时机 | 等充电结束再调 complete | 取消授权时就应完结，不能继续提供服务 |
+| 订单关联 | 手动支付订单与服务订单无关联 | 命名规则（`_MANUAL`后缀）+ 数据库关联字段 |
+| 状态同步 | 两笔订单状态独立 | 手动支付成功后同步更新原服务订单 |
+| 支付记录 | 没有记录 pay_method | 记录最终支付方式，便于对账和排查 |
+
+> 💡 **面试话术**："我们在充电场景中遇到过用户中途取消支付分授权的问题。正确的处理方式是：收到取消回调后立即冻结充电服务，然后按已消费金额调用 complete 接口尝试自动扣款（微信仍会从余额或风险金扣款）。如果 complete 失败，再创建 JSAPI 手动支付订单，关键是这笔订单必须通过 `_MANUAL` 命名规则和数据库关联字段与原支付分服务订单绑定。手动支付成功后，同步更新原服务订单状态为已支付。这样保证了两套订单体系的数据一致性。我们之前的教训是取消授权时没做处理、等充电结束才调 complete，导致服务订单卡死，后来手动支付又创建了无关联的新订单，造成对账差异。"
 
 ### Q10：先用后付天然存在资金风险，用户永远不支付怎么办？是不是白送了？
 
@@ -716,6 +799,47 @@ graph LR
 - 购买信用保险转嫁风险
 
 > 💡 **面试话术**："先用后付的资金风险通过四层对冲机制控制：准入门槛筛用户、风险金预授权兜底（核心）、微信代扣催收追偿、征信约束威慑。风险金是最关键的防线，用户违约时直接扣除，无需等待主动支付。实际坏账率控制在 0.5% 以内，已计入定价模型，类似信用卡业务，是可接受的经营成本。"
+
+### Q11：支付分服务订单时间很长，微信会自动关闭吗？关闭后费用怎么办？
+
+微信确实会在服务订单超过有效期后自动关闭，并发送 `PAYSCORE.ORDER_CLOSED` 回调通知。但**自动关闭 ≠ 免除费用**，已产生的消费仍会被尝试扣款。
+
+**关键区分**：
+
+| 维度 | 微信侧自动关闭 | 商户侧主动完结 |
+| :--- | :--- | :--- |
+| 触发条件 | 超过有效期未完结（默认30天） | 商户调用 `/complete` 接口 |
+| 是否通知 | ✅ 发送 CLOSED 回调 | ❌ 不收到回调（自己关的） |
+| 费用处理 | 仍尝试扣款已消费金额 | 正常结算 |
+| 能否恢复 | ❌ 不可恢复 | ❌ 不可恢复 |
+
+**长周期订单的正确做法**：
+- 创建时设置合理有效期（如酒店7天、共享单车24小时）
+- 到期前主动调用 `modify` 接口延期，**不要依赖微信自动关闭**
+- 监听 `PAYSCORE.ORDER_CLOSED` 回调作为兜底，防止意外关闭导致未结算
+- 自动关闭是异常兜底机制，正常流程应该是商户主动完结
+
+> 💡 **面试话术**："支付分服务订单有有效期，微信超期会自动关闭并发送回调。但自动关闭不等于免单，已消费金额仍会被扣款。对于长周期订单，我们在到期前主动调用 modify 接口延期，而不是依赖自动关闭。自动关闭是异常兜底，正常业务流程应该是商户在服务结束后主动调用 complete 完结订单。同时我们监听 CLOSED 回调作为安全网，防止意外关闭导致费用未结算。"
+
+### Q12：用户反复授权支付分但一直不使用服务，怎么处理？
+
+这个场景本质是**恶意占用资源或刷单行为**。需要澄清：**微信没有"单用户只能授权N次"的硬性规定**，这个限制是商户自己在业务层做的风控。
+
+**微信提供的底层能力**：
+- 同一用户在同一商户下，同时只能有 **1 个进行中的服务订单**
+- 短时间内频繁创建又取消/关闭订单，微信风控系统可能拦截
+
+**商户侧应叠加的风控策略**：
+
+| 策略 | 推荐值 | 说明 |
+| :--- | :--- | :--- |
+| 单日授权上限 | 3-5 次 | 防止恶意刷授权 |
+| 授权后未使用超时 | 5-15 分钟 | 超时自动取消订单，释放资源 |
+| 累计异常阈值 | 3-5 次 | 达到后加入黑名单 |
+| 黑名单冷却期 | 7-30 天 | 冷却期后可重新尝试 |
+| 设备/IP 维度限制 | 同设备/IP 每日 ≤ 10 次 | 防止换号刷单 |
+
+> 💡 **面试话术**："微信没有硬性限制单用户授权次数，但提供了并发订单限制和风控拦截能力。我们在业务层叠加了自己的防刷策略：单日授权上限3-5次、授权后15分钟未使用自动取消订单、累计异常3次加入黑名单、同设备IP每日限10次。这样既防止了恶意占用资源，又不影响正常用户体验。面试时不要说'微信限制了只能授权3次'，而应该说'我们在业务层设置了风控策略'。"
 
 ---
 

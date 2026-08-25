@@ -157,7 +157,102 @@ public class WxLoginController {
 | **体验额度** | 每个小程序账号有 **1000 次免费体验额度**（正式版/体验版/开发版共用） |
 | **免费豁免** | 政府、非营利组织、事业单位政务民生、公立医疗机构、学历教育学校免收费 |
 
-### 新方式流程（推荐，基础库 ≥ 2.21.2）
+### 新旧方式对比
+
+| 维度 | 旧版（session_key 解密） | 新版（动态令牌 code，推荐） |
+| :--- | :--- | :--- |
+| **触发方式** | `wx.login()` 获取 code + `getPhoneNumber` 获取 encryptedData + iv | `button open-type=getPhoneNumber` 获取动态令牌 code |
+| **服务端接口** | `auth.code2Session` → AES 解密 encryptedData | `phonenumber.getPhoneNumber` 直接用 code 换手机号 |
+| **是否需要 session_key** | ✅ 必须，用于解密 | ❌ 不需要 |
+| **安全性** | ⚠️ 较低（session_key 参与解密，泄露风险高） | ⭐️ 更高（code 一次性，不依赖 session_key） |
+| **微信推荐度** | 仍可继续使用，但建议迁移 | ✅ 官方推荐 |
+| **基础库要求** | 所有版本 | ≥ 2.21.2 |
+| **登录与获取手机号** | 可合并为一个接口 | 通常需要两个独立接口 |
+
+### 旧版流程（session_key 解密方式）
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant MP as 小程序前端
+    participant Server as 开发者服务器
+    participant WX as 微信服务器
+
+    User->>MP: 点击获取手机号按钮
+    MP->>MP: wx.login() 获取 code
+    MP->>MP: getPhoneNumber 获取 encryptedData + iv
+    MP->>Server: POST /api/login {code, encryptedData, iv}
+    Server->>WX: GET auth.code2Session?js_code=code
+    WX-->>Server: {openid, session_key}
+    Server->>Server: 用 session_key + iv 解密 encryptedData
+    Server-->>Server: 得到手机号 + 校验 watermark.appid
+    Server->>Server: 保存手机号 + 生成登录态
+    Server-->>MP: {token, phoneNumber, userInfo}
+    Note over Server: ⚠️ session_key 仅服务端使用，绝不下发
+```
+
+#### 旧版服务端解密代码示例
+
+```java
+@PostMapping("/login")
+public Result<?> login(@RequestBody Map<String, String> params) {
+    String code = params.get("code");
+    String encryptedData = params.get("encryptedData");
+    String iv = params.get("iv");
+
+    // 1. 用 code 换取 session_key
+    String url = String.format(
+        "https://api.weixin.qq.com/sns/jscode2session?appid=%s&secret=%s&js_code=%s&grant_type=authorization_code",
+        appid, appSecret, code
+    );
+    JSONObject sessionJson = JSON.parseObject(restTemplate.getForObject(url, String.class));
+    String sessionKey = sessionJson.getString("session_key");
+    String openid = sessionJson.getString("openid");
+
+    // 2. 用 session_key + iv 解密 encryptedData（AES-128-CBC）
+    byte[] encData = Base64.decodeBase64(encryptedData);
+    byte[] ivBytes = Base64.decodeBase64(iv);
+    byte[] keyBytes = Base64.decodeBase64(sessionKey);
+
+    Cipher cipher = Cipher.getInstance("AES/CBC/PKCS7Padding");
+    SecretKeySpec keySpec = new SecretKeySpec(keyBytes, "AES");
+    IvParameterSpec ivSpec = new IvParameterSpec(ivBytes);
+    cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
+    byte[] decrypted = cipher.doFinal(encData);
+
+    // 3. 解析 JSON 得到手机号
+    JSONObject phoneData = JSON.parseObject(new String(decrypted, "UTF-8"));
+    String phoneNumber = phoneData.getString("phoneNumber");
+    String purePhoneNumber = phoneData.getString("purePhoneNumber");
+
+    // 4. ⚠️ 校验 watermark.appid 是否匹配（防伪造，必须做！）
+    JSONObject watermark = phoneData.getJSONObject("watermark");
+    if (!appid.equals(watermark.getString("appid"))) {
+        return Result.fail("数据校验失败，appid 不匹配");
+    }
+
+    // 5. 保存用户信息 + 生成登录态
+    User user = userService.findOrCreateByOpenid(openid);
+    userService.updatePhone(user.getId(), purePhoneNumber);
+    String token = jwtService.generateToken(user.getId(), openid);
+
+    Map<String, Object> data = new HashMap<>();
+    data.put("token", token);
+    data.put("phoneNumber", phoneNumber);
+    return Result.success(data);
+}
+```
+
+#### ⚠️ 旧版安全隐患
+
+| 风险 | 说明 |
+| :--- | :--- |
+| **session_key 泄露** | 解密过程依赖 session_key，泄露后可解密所有用户数据 |
+| **encryptedData 可被重放** | code 一次性，但 encryptedData 本身没有时效校验 |
+| **watermark 校验易被忽略** | 很多开发者忘记校验 `watermark.appid`，导致接受伪造数据 |
+| **前端传递加密数据** | encryptedData 和 iv 由前端传递，理论上可被篡改 |
+
+### 新版流程（推荐，基础库 ≥ 2.21.2）
 
 ```mermaid
 sequenceDiagram

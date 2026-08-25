@@ -431,7 +431,133 @@ sequenceDiagram
 
 ---
 
-## 三、SSO：单点登录原理与实践
+## 三、OAuth2：授权协议规范
+
+### 是什么？
+
+OAuth2（Open Authorization 2.0）是 IETF 发布的**开放标准授权协议**（RFC 6749），定义了"如何让第三方应用安全地获取用户在资源服务器上的有限访问权限"。
+
+> ⚠️ **关键区分**：OAuth2 是**协议规范**，不是框架、不是库。它定义了角色、流程、令牌格式，但不规定具体实现。Spring Authorization Server、Keycloak、Auth0 等都是 OAuth2 协议的实现。
+
+### OAuth2 解决的什么问题？
+
+在没有 OAuth2 之前，第三方应用要访问用户数据，只能让用户把密码交给第三方——这显然不安全。OAuth2 的核心价值是：**用户不需要把密码给第三方，而是通过授权服务器颁发一个有限的、可撤销的令牌（Token）**。
+
+### 四个核心角色
+
+```mermaid
+graph LR
+    RO["Resource Owner<br/>资源所有者（用户）"] -->|"① 授权"| AS["Authorization Server<br/>授权服务器"]
+    AS -->|"② 颁发 Token"| C["Client<br/>客户端（第三方应用）"]
+    C -->|"③ 携带 Token 访问"| RS["Resource Server<br/>资源服务器（API）"]
+    RS -->|"④ 验证 Token"| AS
+    
+    style AS fill:#e3f2fd,stroke:#2196f3
+    style C fill:#fff3e0,stroke:#ff9800
+    style RS fill:#f0f8ff,stroke:#4a90d9
+    style RO fill:#e8f5e9,stroke:#4caf50
+```
+
+| 角色 | 说明 | 实际示例 |
+| :--- | :--- | :--- |
+| **Resource Owner** | 拥有资源的用户 | 微信用户张三 |
+| **Client** | 想访问用户资源的第三方应用 | 你的"智能记账App" |
+| **Authorization Server** | 验证用户身份、颁发 Token 的服务 | 微信授权服务 / Keycloak |
+| **Resource Server** | 持有用户资源、验证 Token 的 API | 微信账单 API / 用户中心 API |
+
+### 四种授权模式（Grant Types）
+
+| 模式 | 适用场景 | 安全性 | 是否推荐 |
+| :--- | :--- | :--- | :--- |
+| **Authorization Code** | Web/App 有后端服务器 | ⭐️ 最高 | ✅ 首选 |
+| **Authorization Code + PKCE** | SPA/移动端无后端 | ⭐️ 最高 | ✅ 无后端时首选 |
+| **Client Credentials** | 服务间调用（无用户参与） | ⭐️ 高 | ✅ 微服务/开放平台应用级认证 |
+| **Refresh Token** | 长期访问，避免频繁授权 | — | ✅ 配合 Authorization Code 使用 |
+| ~~Implicit~~ | 纯前端 SPA | ❌ 低 | ❌ 已废弃，Token 暴露在 URL 中 |
+| ~~Password~~ | 用户直接输密码给客户端 | ❌ 低 | ❌ 已废弃，违背 OAuth2 设计初衷 |
+
+### Authorization Code 流程（最常用）
+
+```mermaid
+sequenceDiagram
+    participant User as 用户浏览器
+    participant Client as 客户端（你的App）
+    participant AS as 授权服务器
+    participant RS as 资源服务器
+
+    User->>Client: 点击"用微信登录"
+    Client-->>User: 302 重定向到 AS/authorize?response_type=code&client_id=xxx&redirect_uri=...&scope=read:bill&state=random
+    User->>AS: 登录并同意授权
+    AS-->>User: 302 重定向到 Client/callback?code=xxx&state=random
+    User->>Client: 带 code 回调
+    Client->>AS: POST /token (code + client_id + client_secret + redirect_uri)
+    Note over Client,AS: ⚠️ 后端到后端通信，client_secret 不暴露给浏览器
+    AS-->>Client: access_token + refresh_token (+ id_token if OIDC)
+    Client->>RS: GET /api/bills (Bearer access_token)
+    RS->>AS: 验证 Token（本地验签或 introspection）
+    AS-->>RS: Token 有效 + scope=read:bill
+    RS-->>Client: 返回账单数据
+    Client-->>User: 展示账单
+```
+
+#### 逐步解析
+
+| 步骤 | 动作 | 关键细节 |
+| :--- | :--- | :--- |
+| ① | 客户端重定向到授权端点 | `response_type=code` 表示使用授权码模式；`state` 参数防 CSRF |
+| ② | 用户在授权服务器登录并同意 | 授权服务器展示"XX应用请求获取你的账单读取权限" |
+| ③ | 授权服务器重定向回客户端并附带 code | code 是**短生命周期、一次性**的临时凭证，不能在浏览器端直接使用 |
+| ④ | 客户端后端用 code 换 Token | **这一步必须是后端到后端通信**，client_secret 绝不能出现在前端代码中 |
+| ⑤ | 授权服务器返回 Token | access_token 用于访问资源，refresh_token 用于续期 |
+| ⑥ | 客户端携带 access_token 访问资源服务器 | 通常放在 `Authorization: Bearer xxx` Header 中 |
+| ⑦ | 资源服务器验证 Token | 可通过本地 JWT 验签或调用授权服务器的 introspection 端点 |
+
+### Client Credentials 流程（服务间调用）
+
+当没有用户参与、纯粹是两个服务之间调用时，使用 Client Credentials 模式：
+
+```mermaid
+sequenceDiagram
+    participant ServiceA as 服务 A（Client）
+    participant AS as 授权服务器
+    participant ServiceB as 服务 B（Resource Server）
+
+    ServiceA->>AS: POST /token (grant_type=client_credentials&client_id=xxx&client_secret=xxx)
+    AS-->>ServiceA: access_token
+    ServiceA->>ServiceB: GET /api/data (Bearer access_token)
+    ServiceB->>ServiceB: 验证 Token + 检查 scope
+    ServiceB-->>ServiceA: 返回数据
+```
+
+> 💡 **与开放平台的关系**：开放平台的 AppKey/AppSecret 验证的就是 Client Credentials 模式中的客户端身份。涉及用户数据的接口再叠加 Authorization Code 模式获取用户级 Token。
+
+### OAuth2 vs OIDC：授权 vs 认证
+
+| 维度 | OAuth2 | OIDC（OpenID Connect） |
+| :--- | :--- | :--- |
+| **定位** | 授权协议（Authorization） | 认证协议（Authentication）= OAuth2 + 身份层 |
+| **核心产物** | access_token（访问资源的凭证） | access_token + **id_token**（JWT 格式的用户身份信息） |
+| **解决的问题** | "这个应用能做什么" | "这个用户是谁" + "这个应用能做什么" |
+| **scope 标志** | 自定义（如 read:bill） | 必须包含 `openid` |
+| **关系** | 基础协议 | OAuth2 的超集 |
+
+> 💡 **一句话总结**：**OAuth2 解决"授权"，OIDC 在 OAuth2 之上加了"认证"**。如果你的需求只是让第三方访问 API，用 OAuth2；如果还需要知道"用户是谁"，用 OIDC。现代 SSO 系统（Keycloak、Auth0）默认都是 OIDC。
+
+### ⚠️ OAuth2 安全要点
+
+| 要点 | 说明 |
+| :--- | :--- |
+| **code 必须一次性** | 授权码使用后必须立即作废，防止重放 |
+| **client_secret 绝不放前端** | 前端代码可被反编译/调试提取 |
+| **PKCE 防 code 拦截** | 无后端场景（SPA/移动端）必须使用 PKCE |
+| **state 防 CSRF** | 每次授权请求生成随机 state，回调时校验一致性 |
+| **redirect_uri 严格匹配** | 防止授权码被重定向到恶意站点 |
+| **Token 短有效期** | access_token 建议 15-30 分钟，配合 refresh_token 续期 |
+| **scope 最小化** | 只申请必要的权限，遵循最小权限原则 |
+
+---
+
+## 四、SSO：单点登录原理与实践
 
 ### 是什么？
 
