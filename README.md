@@ -33,7 +33,7 @@
 
 ## 数据库
 
-- MySQL 面试常问知识点总结
+- [MySQL 面试常问知识点总结（B+树、MVCC、日志系统、锁机制、死锁排查、慢SQL优化）](数据库/MySQL-Interview-Notes.md)
 - Redis 面试常问知识点总结
 - elastic-search 面试常问知识点总结
 
@@ -61,15 +61,19 @@
 
 
 ## 计算机网络基础
-
+- [计算机网络常用名词扫盲（OSI七层、网卡/交换机/路由器、MAC/IP/CIDR/NAT、ARP）](计算机网络/Network-Basics-Notes.md)
 - TCP 与 UDP：区别、可靠传输、流量控制与拥塞控制
 - HTTP/HTTPS：协议演进、TLS 握手、常见状态码与缓存机制
 - Netty 核心原理：Reactor 模型、零拷贝、内存池
 
 ## 操作系统
-- 用户态与内核态、系统调用
-- IO 模型：BIO/NIO/AIO 与 IO 多路复用
-- 内存管理：虚拟内存、分页分段、页面置换
+
+> 📖 **推荐阅读顺序**：内存管理 → 进程管理 → 文件管理 → 设备管理。内存管理是基础（虚拟内存、COW），进程管理建立在其上（fork/地址空间），文件管理依赖内存管理（Page Cache/mmap），设备管理是 IO 模型的硬件基础。
+
+- [内存管理：虚拟内存、分页分段、页面置换、COW、mmap](操作系统/Memory-Management-Notes.md)
+- [进程管理：PCB与状态机、fork/COW、用户态/内核态、IPC、CFS调度、线程模型](操作系统/Process-Management-Notes.md)
+- [文件管理：inode/dentry/VFS、Page Cache、文件描述符、零拷贝](操作系统/File-Management-Notes.md)
+- [设备管理：DMA/中断、IO模型（epoll/io_uring）、设备文件、块设备与字符设备](操作系统/Device-Management-Notes.md)
 
 
 ## AI相关
