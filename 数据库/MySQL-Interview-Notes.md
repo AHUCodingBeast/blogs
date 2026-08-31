@@ -300,22 +300,34 @@ flowchart TD
 | **Read Committed (RC)** | **每次 SELECT 都创建新 ReadView** | 能看到其他事务已提交的最新数据 → **不可重复读** |
 | **Repeatable Read (RR)** | **只在第一次 SELECT 时创建 ReadView** | 整个事务期间看到的快照一致 → **可重复读** |
 
+#### RR 隔离级别下的执行流程
+
 ```mermaid
 sequenceDiagram
-    participant T1 as 事务A（RR）
+    participant T1 as 事务A_RR
     participant T2 as 事务B
     participant DB as MySQL
+    T1->>DB: BEGIN then SELECT
+    Note over T1,DB: 创建ReadView
+    T2->>DB: UPDATE and COMMIT
+    T1->>DB: SELECT again
+    Note over T1,DB: 复用旧ReadView
+    DB-->>T1: 返回100
+```
 
-    T1->>DB: BEGIN; SELECT balance → 100
-    Note over T1,DB: 创建 ReadView（快照时刻）
-    T2->>DB: BEGIN; UPDATE balance=200; COMMIT;
-    T1->>DB: SELECT balance → ?
-    
-    alt RR（复用旧 ReadView）
-        DB-->>T1: 100（看不到事务B的修改）
-    else RC（新建 ReadView）
-        DB-->>T1: 200（看到事务B已提交的修改）
-    end
+#### RC 隔离级别下的执行流程
+
+```mermaid
+sequenceDiagram
+    participant T1 as 事务A_RC
+    participant T2 as 事务B
+    participant DB as MySQL
+    T1->>DB: BEGIN then SELECT
+    Note over T1,DB: 创建ReadView
+    T2->>DB: UPDATE and COMMIT
+    T1->>DB: SELECT again
+    Note over T1,DB: 新建ReadView
+    DB-->>T1: 返回200
 ```
 
 ### 2.5 MVCC 能完全避免幻读吗？
@@ -370,7 +382,7 @@ graph LR
 
 #### WAL（Write-Ahead Logging）原则
 
-> **先写日志，再写磁盘**。即使数据库崩溃，也能通过 redo log 重做未刷盘的修改，保证已提交事务不丢失。
+> **先写日志，再写磁盘**。即使数据库崩溃，也能通过 redo log 重做未刷盘的修改，保证已提交事务不丢失。数据页可以丢（异步刷盘），但 redo log 不能丢（提交时同步 fsync）。WAL 的核心思想就是：只要你保证 redo log 在事务提交时一定落盘，数据页什么时候刷盘都无所谓——因为崩溃后可以用 redo log 重建所有已提交的修改。这就是为什么叫 Write-Ahead Logging（预写日志）：日志永远走在数据前面。
 
 ```mermaid
 sequenceDiagram
@@ -422,19 +434,53 @@ sequenceDiagram
 
 #### 两阶段提交：Redo Log 与 Binlog 的一致性
 
-```mermaid
-sequenceDiagram
-    participant Engine as InnoDB
-    participant Server as Server层
+用一个具体例子走一遍完整流程。假设执行以下 SQL：
 
-    Engine->>Engine: ① Prepare 阶段：写 redo log（prepare 状态）
-    Server->>Server: ② 写 binlog
-    Engine->>Engine: ③ Commit 阶段：写 redo log（commit 状态）
-    
-    Note over Engine,Server: 崩溃恢复逻辑：<br/>redo=prepare + binlog完整 → 提交<br/>redo=prepare + binlog不完整 → 回滚<br/>redo=commit → 已提交
+```sql
+UPDATE account SET balance = 200 WHERE id = 1;
+COMMIT;
 ```
 
-> 💡 **为什么需要两阶段？** 保证 redo log 和 binlog 的逻辑一致。如果只写 redo 不写 binlog，主从不一致；如果只写 binlog 不写 redo，崩溃后数据丢失。两阶段提交确保两者要么都生效，要么都回滚。
+**执行这条 UPDATE 时，InnoDB 和 Server 层按以下顺序协作：**
+
+```mermaid
+sequenceDiagram
+    participant App as 应用
+    participant Engine as InnoDB引擎
+    participant Server as Server层
+
+    App->>Engine: UPDATE account SET balance=200 WHERE id=1
+    Engine->>Engine: 修改Buffer Pool中的数据页(balance=200)
+    Engine->>Engine: 写undo log(记录旧值balance=100)
+    Engine->>Engine: 1.写redo log(prepare状态)并fsync
+    Engine-->>Server: 通知Server层
+    Server->>Server: 2.写binlog并fsync
+    Server-->>Engine: 通知InnoDB
+    Engine->>Engine: 3.写redo log(commit状态)并fsync
+    Engine-->>App: COMMIT成功返回
+```
+
+**关键认知：事务提交的返回 = 第 3 步 fsync 完成**。在此之前，对客户端来说事务还没有提交。
+
+##### 如果在不同阶段断电，会怎样？
+
+| 断电时机 | redo log | binlog | 重启后恢复行为 | 结果是否正确 |
+| :--- | :--- | :--- | :--- | :--- |
+| **第 1 步之后、第 2 步之前** | prepare | ❌ 没有 | redo=prepare + binlog缺失 → **回滚** | ✅ 正确（binlog没写，从库也不该有这个变更） |
+| **第 2 步之后、第 3 步之前** | prepare | ✅ 完整 | redo=prepare + binlog完整 → **补提交** | ✅ 正确（binlog已写，说明应该提交） |
+| **第 3 步之后** | commit | ✅ 完整 | redo=commit → **已提交** | ✅ 正确 |
+| **第 1 步之前** | ❌ 没有 | ❌ 没有 | 无记录 → **忽略** | ✅ 正确（事务根本没开始） |
+
+> 💡 **核心判断标准：以 binlog 是否完整为准**。
+> - binlog 完整 → 提交（即使 redo 还是 prepare，也补提交）
+> - binlog 不完整/缺失 → 回滚（即使 redo 是 prepare，也回滚）
+>
+> **为什么以 binlog 为准？** 因为 binlog 是主从复制的依据。如果主库提交了但 binlog 没写，从库就不会有这个变更，导致主从不一致。所以必须以 binlog 作为"仲裁者"，保证主库和从库看到的事务集合完全一致。
+
+> 💡 **为什么不能只写一个日志？**
+> - **只写 redo 不写 binlog**：崩溃恢复没问题，但从库缺少这个变更 → 主从不一致
+> - **只写 binlog 不写 redo**：从库同步没问题，但主库崩溃后无法恢复这个变更 → 数据丢失
+> - **两阶段提交**：两者要么都生效，要么都回滚 → 既保证崩溃恢复，又保证主从一致
 
 ### 3.5 面试话术
 
@@ -446,35 +492,38 @@ sequenceDiagram
 
 ### 4.1 InnoDB 锁的类型总览
 
-```mermaid
-graph TB
-    subgraph TableLock["表级锁"]
-        TL1["IS / IX（意向锁）"]
-        TL2["AUTO-INC 锁"]
-    end
+InnoDB 的锁可以从两个独立维度来理解：**粒度**（锁多大范围）和**模式**（锁多严格）。这两个维度是正交的，就像"颜色"和"大小"是描述物体的两个不同属性一样。
 
-    subgraph RowLock["行级锁"]
-        RL1["Record Lock（记录锁）"]
-        RL2["Gap Lock（间隙锁）"]
-        RL3["Next-Key Lock（临键锁）"]
-        RL4["Insert Intention Lock（插入意向锁）"]
-    end
+#### 按粒度分类
 
-    TableLock --> RowLock
+| 粒度 | 包含的锁类型 | 说明 |
+| :--- | :--- | :--- |
+| **表级锁** | IS、IX、AUTO-INC | 锁住整张表，粒度粗，并发低 |
+| **行级锁** | Record Lock、Gap Lock、Next-Key Lock、Insert Intention Lock | 锁住索引上的特定记录或间隙，粒度细，并发高 |
 
-    style TableLock fill:#fff3e0,stroke:#ff9800
-    style RowLock fill:#e8f5e9,stroke:#4caf50
-```
+#### 按模式分类
 
-| 锁类型 | 粒度 | 作用 | 触发场景 |
-| :--- | :--- | :--- | :--- |
-| **Record Lock** | 单行 | 锁定索引上的单条记录 | UPDATE/DELETE/SELECT FOR UPDATE 精确命中 |
-| **Gap Lock** | 索引间隙 | 锁定两个索引值之间的"空隙"，防止插入 | RR 级别下范围查询的当前读 |
-| **Next-Key Lock** | 记录+间隙 | Record Lock + Gap Lock 的组合 | RR 级别下范围查询的当前读（默认） |
-| **Insert Intention Lock** | 间隙中的插入点 | 表示"我要在这个间隙插入"，与其他 Insert Intention 兼容 | INSERT 操作 |
-| **IS / IX** | 表级 | 意向共享/排他锁，表示事务打算给行加 S/X 锁 | 加行锁前自动加 |
+| 模式 | 含义 | 兼容性 |
+| :--- | :--- | :--- |
+| **共享锁（S）** | 允许其他事务同时加 S 锁读取 | S 与 S 兼容 |
+| **排他锁（X）** | 独占访问，其他事务不能加任何锁 | X 与一切互斥 |
+| **意向锁（IS/IX）** | 表级的"打招呼"锁，表示事务打算给行加 S/X 锁 | 几乎与一切兼容（详见 4.4 兼容矩阵） |
 
-> ⚠️ **关键认知**：**InnoDB 的行锁是加在索引上的，不是加在数据行上的**。如果 UPDATE 语句没有走索引，会退化为**表锁**。
+#### 各锁类型详解
+
+| 锁类型 | 粒度 | 模式 | 作用 | 触发场景 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Record Lock** | 行级 | S 或 X | 锁定索引上的单条记录 | UPDATE/DELETE/SELECT FOR UPDATE 精确命中索引 |
+| **Gap Lock** | 行级 | S 或 X | 锁定两个索引值之间的"空隙"，防止其他事务在间隙中插入新行 | RR 级别下范围查询的当前读 |
+| **Next-Key Lock** | 行级 | S 或 X | Record Lock + Gap Lock 的组合，既锁记录又锁间隙 | RR 级别下范围查询的当前读（**默认加锁方式**） |
+| **Insert Intention Lock** | 行级 | X | 表示"我要在这个间隙中插入"，多个插入意向锁之间互相兼容 | INSERT 操作 |
+| **IS（意向共享）** | 表级 | S | 表示事务打算给某些行加 S 锁 | 加行级 S 锁前自动加 |
+| **IX（意向排他）** | 表级 | X | 表示事务打算给某些行加 X 锁 | 加行级 X 锁前自动加 |
+| **AUTO-INC** | 表级 | X | 自增列分配时短暂持有，语句结束后立即释放（不等事务结束） | INSERT 使用 AUTO_INCREMENT 列 |
+
+> ⚠️ **关键认知**：
+> - **InnoDB 的行锁是加在索引上的，不是加在数据行上的**。如果 UPDATE 语句没有走索引，会退化为**表锁**。
+> - **意向锁是自动加的**，不需要手动管理。它的作用是让表级锁和行级锁能共存：比如一个事务要给某行加 X 锁，先自动给表加 IX 锁；另一个事务想给整张表加 S 锁时，发现表上有 IX 锁就知道有行被排他锁住了，直接等待，避免逐行检查。
 
 ### 4.2 SELECT FOR UPDATE 详解
 
@@ -594,7 +643,39 @@ graph LR
 
 > 💡 **打破任一条件即可避免死锁**。实践中最可行的是**破坏循环等待**：统一加锁顺序。
 
-### 5.3 经典死锁案例
+### 5.3 MySQL 的自动死锁处理
+
+InnoDB 内置了**死锁检测器（Deadlock Detector）**，会实时监控事务之间的锁等待关系图。一旦检测到循环等待，MySQL 会自动处理：
+
+1. **选择回滚对象**：回滚**undo log 最少**的事务（即修改数据量最小的那个），因为回滚代价与 undo log 大小成正比
+2. **释放锁**：被回滚事务持有的所有锁立即释放
+3. **继续执行**：另一个事务获得所需的锁，继续执行
+4. **返回错误**：被回滚的事务收到错误码 `ER_LOCK_DEADLOCK`（1213）
+
+> ⚠️ **应用层必须处理 1213 错误**。MySQL 只负责"解开死锁"，不负责"重试业务"。如果代码没有捕获这个错误并重试，用户就会看到报错。
+
+```java
+// Java 伪代码：死锁重试
+try {
+    // 执行业务 SQL
+} catch (SQLException e) {
+    if (e.getErrorCode() == 1213) {
+        // 死锁！重试整个事务
+        retryTransaction();
+    } else {
+        throw e;
+    }
+}
+```
+
+| 配置项 | 说明 |
+| :--- | :--- |
+| `innodb_deadlock_detect` | 是否开启死锁检测（默认 ON）。高并发场景下检测本身可能成为瓶颈，可关闭后依赖 `innodb_lock_wait_timeout` 超时回滚 |
+| `innodb_lock_wait_timeout` | 锁等待超时时间（默认 50s）。关闭死锁检测后，事务等锁超过此时间会自动回滚 |
+
+> 💡 **高并发下的权衡**：当并发极高（如数千 TPS）时，死锁检测器的图遍历开销可能很大。此时可以 `SET GLOBAL innodb_deadlock_detect = OFF`，改为依赖锁等待超时来间接解决死锁。代价是死锁事务要等到超时才回滚，而非立即回滚。
+
+### 5.4 经典死锁案例
 
 ```sql
 -- 事务A                          -- 事务B
@@ -607,7 +688,7 @@ UPDATE account SET bal=bal+100    UPDATE account SET bal=bal-100
 -- 持有 id=1 的 X 锁              -- 💥 死锁！
 ```
 
-### 5.4 死锁排查四步法
+### 5.5 死锁排查四步法
 
 #### Step 1：查看最近一次死锁信息
 
@@ -651,7 +732,7 @@ SELECT * FROM information_schema.INNODB_LOCK_WAITS;
 | **间隙锁冲突** | 降低隔离级别到 RC（如果业务允许） |
 | **批量操作锁太多** | 分批处理，控制单次锁数量 |
 
-### 5.5 预防死锁的最佳实践
+### 5.6 预防死锁的最佳实践
 
 | 实践 | 说明 |
 | :--- | :--- |
@@ -662,7 +743,7 @@ SELECT * FROM information_schema.INNODB_LOCK_WAITS;
 | **避免用户交互在事务中** | 事务内不要等用户输入 |
 | **监控告警** | 死锁频率突增时及时排查 |
 
-### 5.6 面试话术
+### 5.7 面试话术
 
 > "死锁是多个事务循环等待彼此持有的锁。排查四步：SHOW ENGINE INNODB STATUS 看最近死锁、开启 innodb_print_all_deadlocks 持久化日志、查 performance_schema.data_locks 看当前锁等待、分析根因修复。预防核心是统一加锁顺序、缩短事务、合理设置超时。MySQL 会自动检测死锁并回滚代价最小的事务。"
 
@@ -743,7 +824,7 @@ Extra 是 EXPLAIN 中**信息量最大的字段**，直接反映 MySQL 的执行
 | :--- | :--- | :--- | :--- |
 | **Using filesort** | **文件排序**：无法利用索引完成 ORDER BY，需要额外的排序操作 | ORDER BY 的列不在索引中，或排序方向与索引不一致 | 让 ORDER BY 的列包含在联合索引中，且顺序一致；或去掉不必要的排序 |
 | **Using temporary** | **临时表**：GROUP BY / DISTINCT / UNION 等操作需要创建内部临时表 | GROUP BY 的列不在索引中；DISTINCT 去重；UNION 合并结果集 | 让 GROUP BY 的列包含在索引中；避免 SELECT * + DISTINCT；用 UNION ALL 替代 UNION |
-| **Using join buffer (Block Nested Loop)** | **BNL 算法**：被驱动表没有索引，使用块嵌套循环连接 | JOIN 时被驱动表的关联列没有索引 | **给被驱动表的关联列加索引**，这是最重要的 JOIN 优化 |
+| **Using join buffer (Block Nested Loop)** | **BNL 算法**：被驱动表没有索引，使用块嵌套循环连接 | JOIN 时被驱动表的关联列没有索引 | **给被驱动表的关联列加索引**，这是最重要的 JOIN 优化（什么叫做被驱动表？谁被"查"就是被驱动表。LEFT JOIN 中右表是被查的一方，所以给右表的关联列加索引。INNER JOIN 中优化器会自动选小表做驱动表，大表是被驱动表，给大表的关联列加索引。） |
 | **Select tables optimized away** | 优化器直接从索引获取聚合结果，无需扫描表 | `SELECT MAX(id) FROM t`（id 是主键） | 无需优化，这是最优执行方式 |
 
 #### ❌ 危险的 Extra（必须优化）
@@ -796,6 +877,60 @@ EXPLAIN SELECT department, COUNT(*) FROM employees GROUP BY department;
 | ORDER BY 产生 filesort | 让排序列包含在索引中 |
 | COUNT(*) 慢 | 估算用 `EXPLAIN` 的 rows；精确计数用缓存或汇总表 |
 
+#### 深分页优化：延迟关联详解
+
+**问题**：`LIMIT 100000, 10` 为什么慢？
+
+```sql
+-- ❌ 传统写法：跳过前 100000 行，取后 10 行
+SELECT * FROM orders ORDER BY id LIMIT 100000, 10;
+```
+
+MySQL 执行这条 SQL 时，实际上需要：
+1. 扫描索引找到前 100010 行
+2. **回表 100010 次**取出完整行数据
+3. 丢弃前 100000 行，只返回最后 10 行
+
+**瓶颈在于回表**：即使你只需要 10 行，MySQL 也要回表 100010 次。offset 越大，回表次数越多，查询越慢。
+
+**解决方案：延迟关联（Deferred Join）**
+
+核心思想：**先用覆盖索引快速定位目标行的主键，再回表取完整数据**。把"大范围回表"拆成"小范围回表"。
+
+```sql
+-- ✅ 延迟关联写法
+SELECT * FROM orders
+INNER JOIN (
+    SELECT id FROM orders ORDER BY id LIMIT 100000, 10
+) tmp ON orders.id = tmp.id;
+```
+
+**为什么快？**
+
+| 步骤 | 传统写法 | 延迟关联 |
+| :--- | :--- | :--- |
+| ① 扫描索引 | 扫描 100010 条索引记录 | 扫描 100010 条索引记录（相同） |
+| ② 回表 | 回表 **100010 次**取完整行 | **不回表**（子查询只查 id，覆盖索引） |
+| ③ 取最终数据 | 已在上一步完成 | 用 10 个 id 回表 **10 次** |
+| **总回表次数** | **100010 次** | **10 次** |
+
+子查询 `SELECT id FROM orders ORDER BY id LIMIT 100000, 10` 只查 id 列，id 是主键索引本身，所以是**覆盖索引**，完全不需要回表。外层再用这 10 个 id 去回表取完整数据，只需 10 次回表。
+
+**前提条件**：
+- 排序列必须有索引（通常是主键或有索引的列）
+- 子查询中只查索引列（保证覆盖索引）
+
+**其他深分页优化方案**：
+
+| 方案 | 适用场景 | 示例 |
+| :--- | :--- | :--- |
+| **延迟关联** | 通用，排序列有索引 | 见上方示例 |
+| **游标分页（Seek Method）** | 连续翻页，上一页最后一条的 id 已知 | `WHERE id > 上页最后id LIMIT 10` |
+| **限制最大页码** | 业务允许 | 禁止翻到第 10000 页，改为搜索/筛选 |
+| **搜索引擎** | 海量数据全文检索 | Elasticsearch / Solr |
+
+> 💡 **游标分页 vs 延迟关联**：游标分页性能最好（直接 `WHERE id > last_id LIMIT 10`，无需跳过任何行），但要求客户端记住上一页的最后一条 id，且不支持跳页。延迟关联支持跳页，性能次之。**能游标就游标，不能游标再延迟关联**。
+
 ### 7.4 面试话术
 
 > "慢 SQL 优化流程：开启慢查询日志 → pt-query-digest 分析 TOP SQL → EXPLAIN 看执行计划 → 重点关注 type、key、rows、Extra。常见优化：加索引避免全表扫描、覆盖索引减少回表、延迟关联优化深分页、UNION ALL 替代 OR、避免函数包裹索引列。优化后务必 EXPLAIN 验证效果。"
@@ -808,49 +943,107 @@ EXPLAIN SELECT department, COUNT(*) FROM employees GROUP BY department;
 
 ### 8.1 窗口函数（Window Functions）
 
-8.0 之前实现排名、累计求和等需求需要复杂的自关联或变量 hack，8.0 原生支持窗口函数：
+#### 解决什么问题？
+
+在 SQL 中做"**分组内的排名、累计求和、行间对比**"等需求。这些需求用 GROUP BY 做不了（GROUP BY 会合并行），5.7 时代只能靠自关联或变量 hack，又丑又慢。
+
+#### 5.7 vs 8.0 对比
 
 ```sql
--- 部门内薪资排名
-SELECT name, department, salary,
-       ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC) AS rank
-FROM employees;
+-- ❌ 5.7 写法：查每个部门薪资排名前 3 的员工（自关联，又丑又慢）
+SELECT a.name, a.department, a.salary
+FROM employees a
+WHERE (
+    SELECT COUNT(*) FROM employees b
+    WHERE b.department = a.department AND b.salary > a.salary
+) < 3;
 
--- 累计求和
-SELECT date, amount,
-       SUM(amount) OVER (ORDER BY date) AS cumulative_amount
-FROM daily_sales;
-
--- 与上一行对比
-SELECT month, revenue,
-       LAG(revenue, 1) OVER (ORDER BY month) AS prev_month_revenue,
-       revenue - LAG(revenue, 1) OVER (ORDER BY month) AS growth
-FROM monthly_report;
+-- ✅ 8.0 写法：一行搞定
+SELECT name, department, salary
+FROM (
+    SELECT name, department, salary,
+           ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC) AS rk
+    FROM employees
+) ranked
+WHERE rk <= 3;
 ```
 
-| 函数 | 用途 |
-| :--- | :--- |
-| `ROW_NUMBER()` | 连续排名（1,2,3） |
-| `RANK()` | 跳跃排名（1,1,3） |
-| `DENSE_RANK()` | 密集排名（1,1,2） |
-| `LAG() / LEAD()` | 取前/后 N 行的值 |
-| `SUM() / AVG() OVER()` | 累计/滑动聚合 |
-| `NTILE(n)` | 将结果集分成 n 桶 |
+#### 核心语法
 
-> 💡 **面试话术**："MySQL 8.0 原生支持窗口函数，解决了 5.7 时代排名、累计求和、行间对比等需求需要自关联或变量的痛点。ROW_NUMBER/RANK/DENSE_RANK 处理排名，LAG/LEAD 处理行间对比，SUM OVER 处理累计聚合。"
+`函数名() OVER (PARTITION BY 分组列 ORDER BY 排序列)`
+
+- **PARTITION BY** = 按什么分组（类似 GROUP BY，但**不合并行**，每行都保留）
+- **ORDER BY** = 组内按什么排序
+- **OVER()** = 定义"窗口"的范围
+
+#### 常用窗口函数速览
+
+| 函数 | 干什么 | 典型场景 |
+| :--- | :--- | :--- |
+| `ROW_NUMBER()` | 连续排名 1,2,3 | 取每组前 N 名 |
+| `RANK()` | 跳跃排名 1,1,3 | 并列时跳过名次 |
+| `DENSE_RANK()` | 密集排名 1,1,2 | 并列时不跳名次 |
+| `LAG(col, n)` | 取前 n 行的值 | 环比计算（本月 vs 上月） |
+| `LEAD(col, n)` | 取后 n 行的值 | 预测下一期 |
+| `SUM() OVER(ORDER BY ...)` | 累计求和 | running total |
+| `NTILE(n)` | 将结果集分成 n 桶 | 分位数分析 |
+
+#### 什么时候该用窗口函数？
+
+当你发现自己在写**自关联、用户变量、或应用层循环处理**来实现以下需求时，就是窗口函数的场景：
+
+| 需求 | 5.7 做法 | 8.0 窗口函数 |
+| :--- | :--- | :--- |
+| 组内排名 | 自关联 COUNT | ROW_NUMBER / RANK |
+| 累计求和 | 变量 @sum | SUM() OVER() |
+| 环比/同比 | 自关联或应用层 | LAG / LEAD |
+| 移动平均 | 自关联 | AVG() OVER(ROWS BETWEEN...) |
+
+> ⚠️ **窗口函数不是替代 GROUP BY**。GROUP BY 用于聚合（多行变一行），窗口函数用于"在不合并行的前提下做组内计算"。两者解决的问题不同。
+
+> 💡 **面试话术**："MySQL 8.0 原生支持窗口函数，解决了 5.7 时代排名、累计求和、行间对比等需求需要自关联或变量的痛点。核心语法是 函数() OVER(PARTITION BY ... ORDER BY ...)，PARTITION BY 定义分组但不合并行。ROW_NUMBER/RANK 处理排名，LAG/LEAD 处理行间对比，SUM OVER 处理累计聚合。"
 
 ### 8.2 CTE（公用表表达式 / WITH 子句）
 
+#### 解决什么问题？
+
+两个痛点：**复杂 SQL 的可读性**和**树形/层级数据的查询**。
+
+#### 普通 CTE：替代嵌套子查询
+
 ```sql
--- 递归查询：组织架构树
+-- ❌ 嵌套子查询，读起来像套娃
+SELECT * FROM (
+    SELECT department, AVG(salary) AS avg_sal
+    FROM employees
+    GROUP BY department
+) dept_avg
+WHERE avg_sal > 10000;
+
+-- ✅ CTE：给中间结果起个名字，像变量一样清晰
+WITH dept_avg AS (
+    SELECT department, AVG(salary) AS avg_sal
+    FROM employees
+    GROUP BY department
+)
+SELECT * FROM dept_avg WHERE avg_sal > 10000;
+```
+
+CTE 还可以**复用**：同一个 WITH 定义的临时结果集可以在主查询中引用多次，避免重复写相同的子查询。
+
+#### 递归 CTE：查树形结构（杀手级功能）
+
+这是 5.7 完全做不到的事。比如查组织架构树：
+
+```sql
 WITH RECURSIVE org_tree AS (
-    -- 锚点：顶级部门
+    -- 锚点：从顶级节点开始
     SELECT id, name, parent_id, 0 AS depth
     FROM departments WHERE parent_id IS NULL
     
     UNION ALL
     
-    -- 递归：子部门
+    -- 递归：每层找子节点
     SELECT d.id, d.name, d.parent_id, t.depth + 1
     FROM departments d
     INNER JOIN org_tree t ON d.parent_id = t.id
@@ -858,13 +1051,23 @@ WITH RECURSIVE org_tree AS (
 SELECT * FROM org_tree ORDER BY depth, name;
 ```
 
-| 特性 | 说明 |
-| :--- | :--- |
-| **普通 CTE** | 替代子查询，提升可读性，可复用 |
-| **递归 CTE** ⭐️ | 原生支持树形/层级数据查询，无需存储过程或应用层递归 |
-| **性能** | 普通 CTE 可能被物化（8.0.20+ 优化器会尝试合并），递归 CTE 有 `cte_max_recursion_depth` 限制（默认 1000） |
+**执行逻辑**：先执行锚点查询拿到根节点，然后反复执行递归部分（每次用上一层的结果去查下一层），直到没有新行为止。
 
-> 💡 **vs 5.7**：5.7 没有 CTE，树形查询只能靠存储过程或应用层多次查询。8.0 的递归 CTE 是**层级数据查询的标准解法**。
+#### 什么时候该用 CTE？
+
+| 场景 | 推荐 | 原因 |
+| :--- | :--- | :--- |
+| SQL 超过 3 层嵌套 | ✅ 普通 CTE | 提升可读性，给中间结果命名 |
+| 同一子查询出现 2 次以上 | ✅ 普通 CTE | 复用，避免重复 |
+| 组织架构/分类树/评论嵌套/BOM | ✅ 递归 CTE | 5.7 只能靠存储过程或应用层多次查询 |
+| 简单单层子查询 | ❌ 不需要 | 直接写子查询即可，CTE 反而多余 |
+
+> ⚠️ **注意事项**：
+> - 普通 CTE 可能被优化器物化（8.0.20+ 会尝试合并优化）
+> - 递归 CTE 有 `cte_max_recursion_depth` 限制（默认 1000），防止无限递归
+> - 递归 CTE 中必须用 `UNION ALL`（不能用 `UNION`，否则去重可能导致递归提前终止）
+
+> 💡 **面试话术**："CTE 用 WITH 子句给中间结果命名，提升复杂 SQL 可读性并支持复用。递归 CTE 是 8.0 的杀手级特性，原生支持树形/层级数据查询（组织架构、分类树、BOM 等），5.7 只能靠存储过程或应用层多次查询。使用时注意递归深度限制和 UNION ALL 的要求。"
 
 ### 8.3 JSON 增强
 
@@ -954,6 +1157,39 @@ FOR UPDATE 是当前读，加排他锁（X锁）。精确匹配索引时加 Reco
 ### Q6：乐观锁和悲观锁怎么选？
 
 写多读少、冲突频繁选悲观锁（SELECT FOR UPDATE）；读多写少、冲突概率低选乐观锁（版本号/CAS）。乐观锁无锁开销，并发高，但冲突时需重试；悲观锁保证串行，但并发低。库存扣减等高冲突场景用悲观锁，配置更新等低冲突场景用乐观锁。
+
+### Q7：UNION 和 JOIN 的区别？
+
+UNION 是**纵向拼接**，把多个 SELECT 的结果集上下叠在一起，行数增加、列数不变，要求各 SELECT 的列数和数据类型一致。JOIN 是**横向关联**，把多张表的列按条件匹配后左右拼在一起，列数增加、行数取决于匹配情况。简单说：UNION 合并同类数据，JOIN 关联不同表的数据。另外 UNION 默认去重（等价于 UNION DISTINCT），UNION ALL 不去重且性能更好，确定无重复时应优先用 UNION ALL。
+
+### Q8：INNER JOIN、LEFT JOIN、RIGHT JOIN 的区别？
+
+| JOIN 类型 | 含义 | 结果行数 |
+| :--- | :--- | :--- |
+| **INNER JOIN** | 只返回两表中**匹配成功**的行 | ≤ 任一表的行数 |
+| **LEFT JOIN** | 返回左表**所有行** + 右表匹配的行（不匹配的右表列填 NULL） | ≥ 左表行数 |
+| **RIGHT JOIN** | 返回右表**所有行** + 左表匹配的行（不匹配的左表列填 NULL） | ≥ 右表行数 |
+| **FULL OUTER JOIN** | 返回两表所有行（MySQL 不支持，可用 LEFT JOIN UNION RIGHT JOIN 模拟） | ≥ 两表行数之和 |
+
+```sql
+-- 示例：students(id, name) 和 scores(student_id, score)
+-- students: (1,'张三'), (2,'李四'), (3,'王五')
+-- scores:   (1,90), (2,80)
+
+-- INNER JOIN：只返回有成绩的学生的成绩
+SELECT s.name, sc.score FROM students s INNER JOIN scores sc ON s.id = sc.student_id;
+-- 结果：张三-90, 李四-80（王五没有成绩，不出现）
+
+-- LEFT JOIN：返回所有学生，没成绩的显示 NULL
+SELECT s.name, sc.score FROM students s LEFT JOIN scores sc ON s.id = sc.student_id;
+-- 结果：张三-90, 李四-80, 王五-NULL
+
+-- RIGHT JOIN：返回所有成绩记录，即使学生不存在（实际少见）
+SELECT s.name, sc.score FROM students s RIGHT JOIN scores sc ON s.id = sc.student_id;
+-- 结果：张三-90, 李四-80
+```
+
+> 💡 **研发日常**：绝大多数场景用 **LEFT JOIN**（保留主表所有数据）。INNER JOIN 用于"只关心匹配数据"的场景。RIGHT JOIN 很少用，通常可以改写为 LEFT JOIN（交换表顺序即可）。面试中被问到 JOIN 区别，一定要用具体例子说明 NULL 的产生条件。
 
 ---
 

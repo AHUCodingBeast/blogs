@@ -34,8 +34,8 @@
 ## 数据库
 
 - [MySQL 面试常问知识点总结（B+树、MVCC、日志系统、锁机制、死锁排查、慢SQL优化）](数据库/MySQL-Interview-Notes.md)
-- Redis 面试常问知识点总结
-- elastic-search 面试常问知识点总结
+- [Redis 面试常问知识点总结（数据结构、持久化、主从复制、哨兵、集群、缓存策略、分布式锁）](数据库/Redis-Interview-Notes.md)
+- [Elasticsearch 面试常问知识点总结（倒排索引、集群架构、写入搜索流程、BM25、深度分页、性能优化）](数据库/Elasticsearch-Interview-Notes.md)
 
 ## 运维
 
