@@ -441,6 +441,8 @@ A 记录：    域名 ──直接──→ IP 地址
 CNAME 记录：域名 ──别名──→ 另一个域名 ──A记录──→ IP 地址
             cdn.example.com → cdn.provider.net → 1.2.3.4
 ```
+>  **CNAME 的使用场景是"别名指向"**：典型场景是，你的服务部署在第三方平台上（比如 CDN），平台给你一个域名 abc123.cdn.com，你把 sub.example.com CNAME 到 abc123.cdn.com。这样用户访问sub.example.com 时，DNS 会递归解析到 CDN 的边缘节点 IP，而且 CDN 那边换 IP 你不需要改配置。
+
 
 | 维度 | A 记录 | CNAME 记录 |
 | :--- | :--- | :--- |
@@ -449,7 +451,7 @@ CNAME 记录：域名 ──别名──→ 另一个域名 ──A记录──�
 | **适用场景** | 根域名（`example.com`）、邮件域 | 子域名、CDN 接入、多环境切换 |
 | **变更灵活性** | 改 IP 需逐个修改 | 改目标域名即可批量生效 |
 
-> ⚠️ **常见坑**：根域名（`example.com`）不能用 CNAME，只能用 A/AAAA 记录。因为根域名还需要 MX、TXT 等记录，而 CNAME 不允许与其他记录共存。这就是为什么很多网站根域名用 A 记录，而 `www` 子域名用 CNAME 指向根域名。
+> ⚠️ **常见坑**：根域名（`example.com`）不能用 CNAME，只能用 A/AAAA 记录。因为根域名还需要 MX、TXT 等记录，而 CNAME 不允许与其他记录共存。这就是为什么很多网站根域名用 A 记录直接指向 IP，而 `www.example.com` 用 CNAME 指向 CDN 提供的域名（如 `abc.cdn.com`）。
 
 #### DNS 解析流程
 

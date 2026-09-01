@@ -127,6 +127,97 @@ graph LR
 
 > 💡 **text 字段没有 Doc Values**。如果你需要对一个字段既做全文搜索又做聚合，需要设置 `fields` 多字段映射：text 类型用于搜索，keyword 子字段（有 Doc Values）用于聚合。
 
+#### 实战：fields 多字段映射
+
+为什么 text 字段没有 Doc Values？因为 text 类型会先把字段值**分词**成多个 term（比如 "Elasticsearch 入门" 被切成 `["Elasticsearch", "入门"]`），Doc Values 存的是按文档组织的原始字段值，如果对分词后的每个 term 都存一份 Doc Values，既浪费存储也没有意义——聚合需要的是**原始值**，不是分词碎片。
+
+**解决方案**：让同一个字段值同时以两种类型存储，各司其职：
+
+- **text 主字段**：分词后建倒排索引，用来做全文搜索
+- **keyword 子字段**：保留原始值不拆分，有 Doc Values，用来做聚合和排序
+
+```mermaid
+graph LR
+    subgraph 写入["写入文档：title = 'Elasticsearch 入门'"]
+        Doc["原始文档"] --> Text["title（text）<br/>分词：['Elasticsearch','入门']"]
+        Doc --> KW["title.keyword（keyword）<br/>保留原值：'Elasticsearch 入门'"]
+    end
+    subgraph 搜索["搜索时"]
+        Text --> Match["match 查询<br/>搜索 'Elasticsearch' 能命中"]
+    end
+    subgraph 聚合["聚合时"]
+        KW --> Agg["terms 聚合<br/>按完整标题分组统计"]
+    end
+```
+
+**创建索引时定义多字段映射**：
+
+```json
+PUT /articles
+{
+  "mappings": {
+    "properties": {
+      "title": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+`title` 是主字段，`title.keyword` 是子字段。写入文档时给 `title` 赋一个值，ES 会自动同时填充 `title.keyword`，不需要写入两份数据。
+
+**使用方式**：搜索用 `title`，聚合用 `title.keyword`，两边互不干扰：
+
+```json
+// 同时搜索 + 聚合
+GET /articles/_search
+{
+  "query": {
+    "match": { "title": "Elasticsearch" }
+  },
+  "aggs": {
+    "group_by_title": {
+      "terms": { "field": "title.keyword", "size": 10 }  # size 表示需要返回最多多少个分组
+    }
+  }
+}
+```
+
+> 💡 **`terms` 聚合本质上就是 SQL 的 `GROUP BY`**。`terms` 按字段值分组并统计每个值的文档数量，等同于 `SELECT title, COUNT(*) FROM articles GROUP BY title`。聚合结果中的 `buckets` 里每个 `key` 对应分组列的值，`doc_count` 对应 `COUNT(*)`。
+
+如果希望所有 string 字段都自动带上 `.keyword` 子字段，可以用动态模板一劳永逸：
+
+```json
+PUT /articles
+{
+  "mappings": {
+    "dynamic_templates": [
+      {
+        "text_as_keyword": {
+          "match_mapping_type": "string",
+          "mapping": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+
 ### 1.5 面试话术
 
 > "ES 的核心是倒排索引：Term Dictionary 用 FST 压缩存内存，Posting List 用 Roaring Bitmap 压缩存磁盘。搜索时对多个词的 Posting List 做交集运算，避免全量扫描。排序和聚合靠 Doc Values（列式存储），text 字段没有 Doc Values，需要用 keyword 子字段。"
@@ -155,7 +246,7 @@ graph LR
 | **Primary Shard** | 主分片，数据写入的入口。数量在创建索引时确定，**不可更改** |
 | **Replica Shard** | 副本分片，主分片的完整拷贝。提供高可用和读扩展 |
 | **分片大小建议** | 单个分片 10GB ~ 50GB，过大恢复慢，过小开销大 |
-| **分片数量建议** | 单节点分片数不超过每 GB 堆内存 20 个 |
+| **分片数量建议** | 单节点分片数不超过每 GB 堆内存 20 个（  比如你的节点配置了 8GB 堆内存，那这个节点上最多放 8 × 20 = 160 个分片（主分片 + 副本分片都算）。） |
 
 ### 2.3 分片分配与路由
 
@@ -230,6 +321,15 @@ flowchart LR
 
 > 💡 **近实时的代价**：Refresh 每秒生成一个新 Segment，小 Segment 太多会影响搜索性能。ES 后台有 **Merge** 进程将小 Segment 合并为大 Segment，同时清理已删除文档（ES 删除是标记删除，Merge 时才真正清除）。
 
+为什么不让写入请求直接写 Segment？
+
+Memory Buffer 和 Segment 虽然都在内存里，但数据结构完全不同：
+
+- **Memory Buffer**：简单的写入缓冲区，数据来了就追加，不构建任何索引，写入速度极快（纯内存追加操作）
+- **Segment**：完整的 Lucene 索引结构，包含倒排索引、Doc Values 等，构建开销大
+
+如果每次写入都直接构建 Segment，高并发下性能会严重下降。ES 的做法是**批量构建**：写入先快速追加到 Memory Buffer，默认每 1 秒执行一次 Refresh，把这一秒内积累的所有文档一起构建成一个新 Segment。这跟 MySQL 的 WAL + 批量刷盘思路一致——用批量操作替代逐条操作，减少索引构建的开销次数。
+
 ### 3.3 Translog 的作用
 
 Translog 类似数据库的 WAL（Write-Ahead Log）：
@@ -239,7 +339,7 @@ Translog 类似数据库的 WAL（Write-Ahead Log）：
 - 如果此时宕机，重启后从 Translog 重放未 fsync 的数据
 - Flush 后 Translog 清空
 
-> ⚠️ **durability 参数**：`index.translog.durability` 默认为 `request`（每次写入都 fsync Translog），保证不丢数据。设为 `async` 可提升写入性能，但可能丢少量数据。
+> ⚠️ **durability 参数**：`index.translog.durability` 默认为 `request`（每次写入都 fsync Translog），保证不丢数据。设为 `async` 可提升写入性能，但可能丢少量数据。这个和 mysql 的 WAL 机制是一样的，mysql 是可以配置`innodb_flush_log_at_trx_commit=1`参数让事务提交的时候强制 fsync 到 redolog
 
 ### 3.4 面试话术
 
@@ -318,6 +418,32 @@ sequenceDiagram
 | **must_not** | ❌ | ✅ | 必须不匹配 |
 
 > 💡 **最佳实践**：不需要评分的条件（如状态过滤、时间范围）放在 filter 中，享受缓存加速。只有需要影响排序的条件才放 must/should。
+
+**实战例子**：搜索"Elasticsearch 入门"，但只返回已发布且价格在 50-100 之间的文章：
+
+```json
+GET /articles/_search
+{
+  "query": {
+    "bool": {
+      "must": [
+        { "match": { "title": "Elasticsearch 入门" } }
+      ],
+      "filter": [
+        { "term": { "status": "published" } },
+        { "range": { "price": { "gte": 50, "lte": 100 } } }
+      ]
+    }
+  }
+}
+```
+
+解释一下各子句的角色：
+
+- `must` 里的 `match` 对标题做全文搜索，匹配到的文档**参与评分**（相关性越高分数越高）
+- `filter` 里的 `term` 和 `range` 做精确过滤，`status=published` 和 `price` 范围这些条件**不参与评分**，但**结果会被缓存**——下次相同的 filter 条件可以直接复用，不用重新计算
+
+这就是为什么 `filter` 适合放状态、时间范围、分类等条件：这些条件天生和"相关性"无关，放进 `must` 只会白白浪费算分开销，而放进 `filter` 还能蹭缓存。
 
 ### 4.5 面试话术
 
@@ -404,7 +530,7 @@ ES 5.0 之前用 TF-IDF，5.0+ 默认用 **BM25**：
 | 10000 | 50050 | 明显延迟 |
 | 100000 | 500050 | 可能 OOM |
 
-> ⚠️ ES 默认限制 `max_result_window = 10000`，超过会直接报错。这不是 bug，是保护机制。
+> ⚠️ ES 默认限制 `max_result_window = 10000`，max_result_window 限制的就是 from + size 的和。超过会直接报错。这不是 bug，是保护机制。
 
 ### 7.2 解决方案对比
 
@@ -414,7 +540,7 @@ ES 5.0 之前用 TF-IDF，5.0+ 默认用 **BM25**：
 | **scroll** | 创建快照上下文，保持搜索结果不变 | 支持遍历全量数据 | 占用资源，不适合实时搜索 | 数据导出、批量处理 |
 | **PIT + search_after** | Point In Time 快照 + search_after | 一致性视图 + 高性能 | 7.10+ 才有 | 需要一致性视图的分页 |
 
-### 7.3 search_after 示例
+### 7.3 search_after 示例（最常用）
 
 ```json
 // 第一页
@@ -435,7 +561,77 @@ GET /orders/_search
 
 > 💡 **sort 必须包含唯一值**（如 `_id`），否则相同 sort value 的文档可能丢失或重复。
 
-### 7.4 面试话术
+### 7.4 scroll 示例 （逐渐废弃）
+
+scroll 先创建一个快照上下文，然后像游标一样不断向后取数据，适合数据导出场景：
+
+```json
+// 第一步：创建 scroll 上下文，设置快照保持 5 分钟
+POST /orders/_search?scroll=5m
+{
+  "size": 1000,
+  "query": {
+    "range": { "created_at": { "gte": "2024-01-01" } }
+  }
+}
+// 返回结果中包含 _scroll_id，后续请求靠它继续翻页
+
+// 第二步：用 _scroll_id 取下一页
+POST /_search/scroll
+{
+  "scroll": "5m",
+  "scroll_id": "DXF1ZXJ5QW5kRmV0Y2gBAAAA..."
+}
+
+// 第三步：取完数据后记得释放 scroll 上下文，避免占用资源
+DELETE /_search/scroll
+{
+  "scroll_id": "DXF1ZXJ5QW5kRmV0Y2gBAAAA..."
+}
+```
+
+> ⚠️ scroll 的 size 是**每个分片**返回的文档数，不是总和。比如 3 个分片、size=1000，每页实际返回最多 3000 条。scroll 上下文会占用堆内存，用完后务必 DELETE 释放。
+
+### 7.5 PIT + search_after 示例
+
+PIT（Point In Time）给搜索提供一个一致性快照，**避免索引变更导致翻页时数据重复或丢失**，结合 search_after 实现高性能分页：
+
+```json
+// 第一步：创建 PIT，设置保留 5 分钟
+POST /orders/_pit?keep_alive=5m
+// 返回 { "id": "46_tAwEd..." }，这就是 PIT ID
+
+// 第二步：用 PIT 做第一页搜索（注意搜的是 _search，不是 /orders/_search）
+GET /_search
+{
+  "size": 10,
+  "pit": {
+    "id": "46_tAwEd...",
+    "keep_alive": "5m"
+  },
+  "sort": [{"created_at": "desc"}, {"_shard_doc": "asc"}]
+}
+
+// 第三页：用上一页最后一条的 sort 值继续翻
+GET /_search
+{
+  "size": 10,
+  "pit": {
+    "id": "46_tAwEd...",
+    "keep_alive": "5m"
+  },
+  "search_after": ["2024-01-15T10:30:00Z", 12345],
+  "sort": [{"created_at": "desc"}, {"_shard_doc": "asc"}]
+}
+
+// 用完释放 PIT
+DELETE /_pit
+{
+  "id": "46_tAwEd..."
+}
+```
+
+### 7.6 面试话术
 
 > "深度分页问题是 from+size 过大时每个分片返回大量结果导致协调节点压力剧增。ES 默认限制 max_result_window=10000。解决方案：实时搜索用 search_after（无状态、性能稳定），数据导出用 scroll（快照上下文），7.10+ 可用 PIT+search_after 获得一致性视图。禁止用 from+size 做深度翻页。"
 
