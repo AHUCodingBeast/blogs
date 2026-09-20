@@ -20,7 +20,7 @@
 
 ## Java基础
 
-- Java 锁机制：synchronized、ReentrantLock、volatile、CAS
+- [Java 锁机制：synchronized、ReentrantLock、volatile、CAS](Java基础/Java-Lock-Mechanism-Notes.md)
 - Java 内存模型（JMM）：happens-before、可见性、有序性
 - 常用异步工具：CompletableFuture、ForkJoinPool、虚拟线程
 - 线程池：核心参数、拒绝策略、生产配置实践
