@@ -21,9 +21,9 @@
 ## Java基础
 
 - [Java 锁机制：synchronized、ReentrantLock、volatile、CAS](Java基础/Java-Lock-Mechanism-Notes.md)
-- Java 内存模型（JMM）：happens-before、可见性、有序性
+- [Java 内存模型（JMM）：happens-before、可见性、有序性](Java基础/JMM-Notes.md)
 - 常用异步工具：CompletableFuture、ForkJoinPool、虚拟线程
-- 线程池：核心参数、拒绝策略、生产配置实践
+- [线程池：核心参数、拒绝策略、生产配置实践与 Spring @Async](Java基础/ThreadPool-Notes.md)
 - AQS 原理：CLH 队列、state、Condition
 - ThreadLocal 原理：内存泄漏、InheritableThreadLocal、TTL
 - JVM 内存模型与垃圾回收：GC 算法、收集器、调优实战
