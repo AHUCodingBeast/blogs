@@ -27,7 +27,7 @@
 - [线程池：核心参数、拒绝策略、生产配置实践与 Spring @Async](Java基础/ThreadPool-Notes.md)
 - AQS 原理：CLH 队列、state、Condition
 - ThreadLocal 原理：内存泄漏、InheritableThreadLocal、TTL
-- JVM 内存模型与垃圾回收：GC 算法、收集器、调优实战
+- [JVM 内存模型与垃圾回收：GC 算法、收集器（Serial/Parallel/CMS/G1）、调优实战](Java基础/JVM-GC-Notes.md)
 - 集合框架：HashMap 底层、ConcurrentHashMap、ArrayList vs LinkedList
 - 类加载机制：双亲委派、打破双亲委派、SPI
 - 反射与动态代理：JDK Proxy vs CGLIB、Spring AOP 底层
@@ -85,6 +85,7 @@
 - AI Agent 开发：Spring AI、LangChain/LangGraph、Tool Use
 - LLM 应用架构：流式输出、Token 计费、缓存策略、安全护栏
 - [AI 编程方法论：如何让 AI 写出高质量代码](AI编程/AI-Programming-Notes.md)
+- [Pi Agent 使用指南](AI编程/Pi-guide.md)
 
 
 # 优秀文章链接

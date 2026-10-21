@@ -211,12 +211,15 @@ int c = a + b;   // ③  ①、② happens-before ③
 #### ② 监视器锁规则（Monitor Lock Rule）
 
 ```java
-// 对同一个锁：unlock happens-before lock
+int x = 0;
+Object lock = new Object();
+
+// 线程 A：unlock happens-before 后续的 lock
 synchronized (lock) {       // lock ④
     x = 10;                 // ⑤
 }                           // unlock ⑥
 
-// 另一个线程：
+// 线程 B：
 synchronized (lock) {       // lock ⑦ —— ⑥ happens-before ⑦，所以能看到 x = 10
     System.out.println(x);  // ⑧ 一定输出 10
 }
@@ -237,19 +240,34 @@ int r = v;  // volatile 读 —— 线程 A 的写 happens-before 此读，r 一
 而且 volatile 写 **不仅仅对 volatile 变量本身**保证可见性——写之前的全部写入都对后续 volatile 读可见：
 
 ```java
+int x = 0;               // 普通变量，没有 volatile
+volatile boolean flag = false;
+
 // 线程 A：
-x = 1;      // 普通变量
-flag = true; // volatile 写
+x = 1;                   // 普通写
+flag = true;             // volatile 写
 
 // 线程 B：
-if (flag) {             // volatile 读
-    int r = x;          // r 一定是 1，因为 volatile 的"附带可见性"
+if (flag) {              // volatile 读
+    int r = x;           // r 一定是 1，因为 volatile 的"附带可见性"
 }
 ```
+
+> 💡 **为什么普通变量 `x` 也能被看到？—— 传递性推导**：
+> ```
+> ① x = 1 (普通写)  ──程序顺序规则──▶  ② flag = true (volatile 写)
+> ② flag = true     ──volatile 规则──▶  ③ if (flag) 读到 true (volatile 读)
+> ③ volatile 读     ──程序顺序规则──▶  ④ r = x (普通读)
+>                         ↓
+>         ① x = 1  happens-before  ④ r = x   →  一定读到 1 ✅
+> ```
+> **一句话**：volatile 写像一个"**栅栏**"，写之前的所有修改都被刷到主内存；volatile 读也是栅栏，读之后能拿到最新值。所以别看只写了一个 `volatile boolean flag`，它实际把线程 A 在 `flag = true` **之前做的所有事情**都"广播"给了线程 B。
 
 #### ④ 线程启动规则（Thread Start Rule）
 
 ```java
+int x = 0;
+
 x = 42;                              // 主线程操作
 Thread t = new Thread(() -> {
     System.out.println(x);           // 一定能看到 x = 42
@@ -260,6 +278,8 @@ t.start();                           // start() happens-before 线程内所有�
 #### ⑤ 线程终止规则（Thread Termination Rule）
 
 ```java
+int x = 0;
+
 Thread t = new Thread(() -> {
     x = 42;                          // 线程内操作
 });
@@ -271,6 +291,9 @@ System.out.println(x);               // 一定能看到 x = 42
 #### ⑧ 传递性（最常用也最重要）
 
 ```java
+int x = 0;
+volatile boolean flag = false;
+
 // 线程 A：
 x = 1;         // ①
 flag = true;   // ② volatile 写
@@ -364,73 +387,152 @@ count.incrementAndGet();
 
 ---
 
-## 五、final 域的内存语义
+## 五、final 的"半条命"可见性
 
-### 5.1 final 的初始化安全
+### 5.1 先搞清楚问题：final 到底保什么？
+
+多线程下，`new` 一个对象不是一步完成的。底层可能是先分配内存、再赋值 `instance` 引用、最后才执行构造函数里的赋值——**顺序可能被打乱**。final 要解决的就是这个"对象还没构造完，就被别人拿到了"的问题。
+
+看一个生活中更常见的例子——**配置对象**：
 
 ```java
-public class FinalExample {
-    private final int x;
-    private int y;            // 普通变量
-    private static FinalExample instance;
+public class AppConfig {
+    private final String dbUrl;      // final：数据库地址
+    private String logLevel;         // 普通：日志级别
 
-    public FinalExample() {
-        x = 1;                // final 写入
-        y = 2;                // 普通写入
+    public AppConfig() {
+        dbUrl = "jdbc:mysql://...";  // ① final 赋值
+        logLevel = "DEBUG";          // ② 普通赋值
     }
+}
 
-    public static void writer() {
-        instance = new FinalExample();
-    }
+// 初始化代码
+static AppConfig config;
 
-    public static void reader() {
-        FinalExample obj = instance;
-        if (obj != null) {
-            int a = obj.x;    // ✅ 保证是 1（final 保证了初始化安全）
-            int b = obj.y;    // ❌ 可能是 0！普通变量可能被重排序
-        }
+// 线程 A：加载配置
+config = new AppConfig();
+
+// 线程 B：使用配置
+AppConfig cfg = config;
+if (cfg != null) {
+    String url = cfg.dbUrl;     // ？能保证是 "jdbc:mysql://..." 吗
+    String log = cfg.logLevel;  // ？能保证是 "DEBUG" 吗
+}
+```
+
+答案取决于 **`config` 是怎么发布的**。
+
+---
+
+### 5.2 final 生效的条件：两步缺一不可
+
+```mermaid
+graph LR
+    A["① 构造完成<br/>（this 没逃逸）"] --> B["② 安全发布<br/>（引用有 happens-before）"]
+    B --> C["✅ final 值一定正确"]
+
+    A1["① 构造完成"] --> D["② 不安全发布<br/>（普通变量赋值）"]
+    D --> E["❌ final 也可能读到 0"]
+
+    F["① this 逃逸<br/>（构造中暴露引用）"] --> G["无论怎么发布"]
+    G --> H["❌ final 也可能读到 0"]
+
+    style A fill:#e8f5e9,stroke:#4caf50
+    style B fill:#e8f5e9,stroke:#4caf50
+    style C fill:#c8e6c9,stroke:#4caf50
+    style D fill:#ffcdd2,stroke:#f44336
+    style E fill:#ffcdd2,stroke:#f44336
+    style F fill:#ffcdd2,stroke:#f44336
+    style H fill:#ffcdd2,stroke:#f44336
+```
+
+**条件一：构造完成（没有 this 逃逸）**
+
+`this` 逃逸 = 在构造函数还没执行完时，`this` 就被另一个线程拿到了。这是 final 的第一个"杀手"。
+
+```java
+// ❌ this 逃逸：构造函数里把 this 暴露了
+public class BadConfig {
+    private final String url;
+
+    public BadConfig() {
+        Manager.register(this);   // ① this 被传出去了！
+        url = "jdbc:mysql://..."; // ② 才赋值 —— 别人拿到时 url 可能还是 null
     }
 }
 ```
 
-JMM 对 final 域有两个特殊规则：
+**条件二：安全发布（引用传递有 happens-before）**
 
-| 规则 | 说明 |
+就是其他线程拿到这个对象引用的路径上，存在同步操作：
+
+```java
+// ✅ 安全发布方式（任选一种）
+static volatile AppConfig config;              // volatile
+static AppConfig config;
+synchronized (lock) { config = new ...; }      // 同步块
+static final AppConfig config = new ...;       // 静态初始化器
+
+// ❌ 不安全发布
+static AppConfig config;                       // 普通变量，没有同步
+config = new AppConfig();                      // 数据竞争
+```
+
+---
+
+### 5.3 一图对比 final 的两个作用
+
+其实 final 做的就一件事——**禁止重排序**。具体来说两个方向：
+
+```java
+public class AppConfig {
+    private final String url;       // final
+    private String logLevel;        // 普通
+
+    public AppConfig() {
+        url = "jdbc:mysql://...";   // ①
+        logLevel = "DEBUG";         // ②
+    }
+}
+
+// 安全发布（比如 volatile）
+volatile static AppConfig config;
+config = new AppConfig();           // ③ 引用赋值
+
+// 其他线程：
+AppConfig c = config;               // ④ 读引用
+String url = c.url;                 // ⑤ 读 final 域
+String log = c.logLevel;            // ⑥ 读普通域
+```
+
+```
+JMM 禁止两种重排序：
+
+动作一：① final 赋值 一定在 ③ 引用赋值 之前
+         → 保证：别人拿到引用时，final 字段已经赋好值了
+
+动作二：⑤ 读 final 域 一定在 ④ 读引用 之后
+         → 保证：不会在拿到引用之前就去读 final 字段
+
+结论：只要满足"构造完成 + 安全发布"两步，
+      url 一定读到 "jdbc:mysql://..." ✅
+      logLevel 可能读到 "DEBUG" 也可能读到 null ❌（因为没有 final 语义）
+```
+
+---
+
+### 5.4 总结：final 能保什么、不能保什么
+
+| 场景 | final 的结果 |
 | :--- | :--- |
-| **构造函数内 final 写** | 禁止 final 域写入与"对象引用赋值给其他变量"重排序 |
-| **初次读 final 域** | 禁止初次读对象引用与初次读该对象的 final 域重排序 |
+| 安全发布 + 构造完成 | ✅ final 值一定是构造函数里赋的值 |
+| 不安全发布（普通变量） | ❌ final 也可能看到 0/null |
+| this 逃逸（构造中暴露引用） | ❌ final 也可能看到 0/null |
+| 普通变量（非 final） | ❌ 无论怎么发布，都可能看到 0/null |
 
-> 💡 **一句话**：`final` 域保证**只要对象被正确构造出来**（没有构造函数逃逸），所有线程看到的 final 值就是构造函数中赋予的值，不需要同步。
-
-### 5.2 构造函数逃逸问题
-
-```java
-// ❌ 危险写法：this 逃逸
-public class ThisEscape {
-    private final int x;
-
-    public ThisEscape() {
-        // 在构造函数完成前，this 就被另一个线程拿到了！
-        SomeClass.register(this);  // this 逃逸！
-        x = 42;   // 另一个线程此时读 x 可能看到 0
-    }
-}
-
-// ✅ 正确写法：工厂方法
-public class SafeConstruction {
-    private final int x;
-
-    private SafeConstruction() {
-        x = 42;  // 先构造完成
-    }
-
-    public static SafeConstruction create() {
-        SafeConstruction obj = new SafeConstruction();
-        SomeClass.register(obj);  // 构造完成后再注册，this 不逃逸
-        return obj;
-    }
-}
-```
+> 💡 **一句话**：final 不是"线程安全"的代名词。它只做一件事——**禁止对象赋值的"半成品重排序"**。但前提是你得先用 volatile / synchronized 把对象引用安全地送到别的线程手上。final 保的是对象内部的完整性，不保对象引用的传递。
+>
+> **通俗类比**：final 就像快递里的泡沫包装——它保证包裹到达时里面的东西完好。但包裹本身能不能送到，是快递员（volatile/synchronized）的事。快递没送到，泡沫包装再好也没用。
 
 ---
 
