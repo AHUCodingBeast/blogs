@@ -23,9 +23,9 @@
 
 - [Java 锁机制：synchronized、ReentrantLock、volatile、CAS](Java基础/Java-Lock-Mechanism-Notes.md)
 - [Java 内存模型（JMM）：happens-before、可见性、有序性](Java基础/JMM-Notes.md)
-- 常用异步工具：CompletableFuture、ForkJoinPool、虚拟线程
+- [常用异步工具：CompletableFuture 异步编排、ForkJoinPool 分治、CountDownLatch/CyclicBarrier/Semaphore 协作、虚拟线程](Java基础/Async-Tools-Notes.md)
 - [线程池：核心参数、拒绝策略、生产配置实践与 Spring @Async](Java基础/ThreadPool-Notes.md)
-- AQS 原理：CLH 队列、state、Condition
+- [AQS 原理：state 语义、CLH 变体队列与 waitStatus、Condition 双队列搬家、PROPAGATE 传播、手写独占锁](Java基础/AQS-Notes.md)
 - ThreadLocal 原理：内存泄漏、InheritableThreadLocal、TTL
 - [JVM 内存模型与垃圾回收：GC 算法、收集器（Serial/Parallel/CMS/G1）、调优实战](Java基础/JVM-GC-Notes.md)
 - 集合框架：HashMap 底层、ConcurrentHashMap、ArrayList vs LinkedList
@@ -79,13 +79,12 @@
 
 ## AI相关
 
-- Transformer 与 LLM 基础：Tokenization、推理优化、Function Calling
-- Prompt Engineering：系统提示词设计、Few-shot、CoT 思维链
+- Transformer 与 LLM 基础
 - RAG 实战：Embedding、向量检索、Chunking 策略、混合搜索
-- AI Agent 开发：Spring AI、LangChain/LangGraph、Tool Use
-- LLM 应用架构：流式输出、Token 计费、缓存策略、安全护栏
-- [AI 编程方法论：如何让 AI 写出高质量代码](AI编程/AI-Programming-Notes.md)
-- [Pi Agent 使用指南](AI编程/Pi-guide.md)
+- AI Agent 开发：Spring AI、LangChain/LangGraph、AgentLoop、Harness
+- [VLLM 大模型计算加速基本原理](AI/VLLM-Notes.md)
+- [AI 编程方法论：如何让 AI 写出高质量代码](AI/AI-Programming-Notes.md)
+- [Pi Agent 使用指南](AI/Pi-guide.md)
 
 
 # 优秀文章链接

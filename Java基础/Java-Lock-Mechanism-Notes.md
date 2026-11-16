@@ -101,6 +101,10 @@ graph LR
 
 > ⚠️ **锁升级是不可逆的**。一旦升级到重量级锁，不会再降回轻量级锁或偏向锁。如果你的应用从低并发变成高并发，锁会一直停留在重量级，不会"恢复"。
 
+> 💡 **偏向锁的 epoch（偏向世代）是什么**：偏向撤销很贵（要等全局安全点 STW），为了降低"某个类的对象被陆续偏向到不同线程"的代价，HotSpot 引入了**批量重偏向**机制：epoch（2 bit）同时存在对象的 Mark Word 和类的 Klass 里，代表"当前偏向属于第几代"。当某个类的偏向撤销次数达到阈值（默认 20 次），JVM 把类的 epoch +1，堆里的老对象还停在旧 epoch；新线程再访问老对象时发现"对象 epoch ≠ 类 epoch"，直接 CAS 重新偏向即可，不用走完整的撤销流程；撤销达 40 次则触发整类批量重偏向。一句话：**epoch 是偏向的"批次号"，让过期偏向惰性刷新，而不是逐个 STW 撤销**。
+>
+> ⚠️ 版本注意：偏向锁在 **JDK 15 被废弃并默认禁用**（JEP 374，理由是现代多线程应用下维护成本大于收益），后续版本已移除。JDK 15+ 的锁升级路径实际是"无锁 → 轻量级 → 重量级"。面试讲锁升级不变，但记得补一句这个版本变化。
+
 ### 1.4 对象头：锁信息存在哪里？
 
 每个 Java 对象在内存中都有一个**对象头（Object Header）**，锁的状态信息就记录在这里：
@@ -117,6 +121,33 @@ graph LR
 
 > 💡 **通俗理解**：对象头就像身份证，Mark Word 是"备注栏"——根据对象当前状态，里面记录的东西不一样。无锁时记录 hashCode，有锁时记录线程和锁信息。
 
+#### 锁记录（Lock Record）详解：为什么栈里会有锁记录？
+
+轻量级锁的"指向栈中锁记录"是网上文章讲得最含糊的地方。完整动作是：线程进入 synchronized 块时，JVM 在**当前栈帧**里开辟一块叫 **Lock Record** 的空间，把对象当前的 Mark Word 拷贝进去（官方名字 **Displaced Mark Word**，"被置换出来的 Mark Word"），然后用 CAS 把对象头替换成指向这个 Lock Record 的指针，标志位变 00：
+
+```mermaid
+graph LR
+    subgraph Frame["线程栈帧（synchronized 块内）"]
+        LR["Lock Record<br/>─────────<br/>Displaced Mark Word<br/>（原 hashCode/年龄的副本）<br/>owner：指向被锁对象"]
+    end
+    subgraph Obj["堆中对象头"]
+        MW["Mark Word<br/>= 指向 Lock Record 的指针<br/>标志位 00（轻量级锁）"]
+    end
+    MW -->|"指向"| LR
+    LR -.->|"解锁时 CAS 把副本写回"| MW
+
+    style Frame fill:#e3f2fd,stroke:#2196f3
+    style Obj fill:#fff3e0,stroke:#ff9800
+```
+
+为什么要这么设计？三个理由：
+
+1. **原 Mark Word 得有地方放**：对象头被"指针"占了，hashCode、GC 年龄这些原始信息必须找地方存——就存在 Displaced Mark Word 里。解锁时 CAS 还原回去；膨胀成重量级锁时搬进 monitor。
+2. **生命周期天然匹配**：锁随 synchronized 块开始和结束，Lock Record 作为栈帧的一部分随压栈出栈自动创建销毁——**不用堆分配、没有 GC 压力、成本极低**，这正是"轻量级"三个字的由来。
+3. **重入计数白嫌**：嵌套 synchronized 每进一层新建一个 Lock Record，重入时它的 Displaced Mark Word 置 null——同一线程对同一对象持有几个 null 的 Lock Record，就是重入几层，解锁时逐层退出。
+
+解锁：从栈里找到自己的 Lock Record，把 Displaced Mark Word CAS 写回对象头。**CAS 失败则说明期间有其他线程竞争过，锁已膨胀成重量级**（对象头已指向 monitor），此时走重量级流程释放并唤醒 EntryList 里的等待线程。
+
 ### 1.5 Monitor 机制：重量级锁的底层实现
 
 ```mermaid
@@ -131,7 +162,7 @@ graph TB
     T2["线程 B"] -->|"竞争失败，阻塞"| EntryList
     Owner -->|"调用 wait()"| WaitSet
     WaitSet -->|"被 notify() 唤醒"| EntryList
-    Owner -->|"调用 unlock()"| Empty["_owner = null<br/>唤醒 EntryList 中的线程"]
+    Owner -->|"monitorexit（退出同步块）"| Empty["_owner = null<br/>唤醒 EntryList 中的线程"]
 
     style Owner fill:#e8f5e9,stroke:#4caf50
     style EntryList fill:#fff3e0,stroke:#ff9800
@@ -143,6 +174,28 @@ graph TB
 - **`_owner`**：指向当前持有锁的线程，没锁时是 null
 - **`_EntryList`**：想要获取锁但被阻塞的线程队列
 - **`_WaitSet`**：调用了 `wait()` 释放锁并等待的线程队列
+
+#### 你从没调过 unlock，锁是怎么进去和出来的？
+
+写 synchronized 时你确实没写过 `unlock()`——因为**编译器和 JVM 替你做了**：
+
+| 你的写法 | 实际发生的事 |
+| :--- | :--- |
+| `synchronized(obj) {...}` 代码块 | 编译成 `monitorenter` / `monitorexit` 两条字节码（exit 有两条：正常退出 + 异常退出各一条，保证锁必被释放） |
+| `synchronized` 修饰方法 | 方法加 `ACC_SYNCHRONIZED` 访问标志，JVM 调用时隐式 enter、返回/抛异常时隐式 exit |
+
+这两条指令对应的就是 C++ 层 ObjectMonitor 的 `enter` / `exit` 操作。所以上面图里的"unlock"是**概念画法**，指"退出 monitor、清空 _owner、唤醒 EntryList"这个动作；真正显式的 `unlock()` **方法**只存在于 ReentrantLock 这类 API 级锁——这也是 JVM 内置锁和 API 锁两条路线的直观差异之一。
+
+而 `wait()/notify()` 是你**可选主动调用**的 API（Object 类的 native 方法），不用"条件等待"就全程不碰它们。但一旦用，有铁律：**必须在持有该对象锁的 synchronized 块内调用**，否则抛 `IllegalMonitorStateException`——因为它们操作的是该对象 monitor 内部的 WaitSet/EntryList，只有 `_owner` 线程有资格碰。这也解释了 wait/notify 和 synchronized 的绑定关系：它们本来就是 Monitor 状态机的一部分，不是独立的 API。
+
+```java
+synchronized (queue) {
+    while (queue.isEmpty()) {   // ① 检查条件
+        queue.wait();           // ② 不满足，睡
+    }
+    return queue.take();
+}
+```
 
 > 💡 **对比 wait/notify 和 sleep**：`wait()` 会释放锁，让出 CPU，进入 WaitSet 等待被唤醒；`sleep()` 不会释放锁，只是让出 CPU 一段时间。这是面试中的经典区分点。
 
@@ -179,25 +232,7 @@ try {
 
 ### 2.2 AQS 核心原理：锁是如何实现的？
 
-ReentrantLock 的底层依赖 **AQS（AbstractQueuedSynchronizer）**，这是 Java 并发包的基石。几乎所有锁和同步器（CountDownLatch、Semaphore 等）都基于 AQS 实现。
-
-**AQS 的两个核心组成**：
-
-```mermaid
-graph TB
-    subgraph AQS["AQS 核心结构"]
-        State["state 变量<br/>（volatile int）<br/>0 = 未锁定<br/>N = 重入次数"]
-        Queue["CLH 队列变体<br/>FIFO 双向链表<br/>存放等待线程"]
-    end
-
-    T1["线程 A"] -->|"CAS 尝试<br/>0 → 1"| State
-    State -->|"成功"| Hold["线程 A 持有锁"]
-    T2["线程 B"] -->|"CAS 失败<br/>state 不为 0"| Queue
-    Queue -->|"线程 A 释放锁<br/>state → 0"| Wake["唤醒队列头部线程"]
-
-    style State fill:#e8f5e9,stroke:#4caf50
-    style Queue fill:#fff3e0,stroke:#ff9800
-```
+ReentrantLock 的底层依赖 **AQS（AbstractQueuedSynchronizer）**，这是 Java 并发包的基石。几乎所有锁和同步器（CountDownLatch、Semaphore 等）都基于 AQS 实现 (本系列博客由单独的篇章介绍)。
 
 **获取锁的流程**：
 
@@ -205,24 +240,28 @@ graph TB
 sequenceDiagram
     participant T1 as 线程 A
     participant T2 as 线程 B
-    participant AQS as AQS
+    participant AQS as AQS（state + 队列）
 
-    T1->>AQS: CAS 尝试 state: 0 → 1
-    AQS-->>T1: 成功，设置 exclusiveOwnerThread = A
-    Note over T1: 线程 A 持有锁
+    T1->>AQS: tryAcquire：读到 state==0 → CAS 0→1
+    AQS-->>T1: 成功，exclusiveOwnerThread = A
+    Note over T1: A 持锁（state=1）
 
-    T2->>AQS: CAS 尝试 state: 1 → 2
-    AQS-->>T2: 失败（state != 0）
-    T2->>AQS: 检查当前线程是否 == exclusiveOwnerThread
-    AQS-->>T2: 否（持有者是 A）
-    Note over T2: 线程 B 入队，park 阻塞
+    T2->>AQS: tryAcquire：读到 state=1 ≠ 0
+    T2->>AQS: 检查 owner 是不是自己？
+    AQS-->>T2: 不是（持有者是 A）→ 失败
+    Note over T2: B 入 CLH 队列排队，park 挂起
 
-    T1->>AQS: unlock() → state: 1 → 0
-    AQS->>T2: unpark 唤醒队列头部线程
-    Note over T2: 线程 B 重新竞争，获取锁
+    T1->>AQS: unlock → tryRelease：state 1→0，清空 owner
+    AQS->>T2: unparkSuccessor 唤醒 head 后驱节点
+    Note over T2: B 醒来重新 tryAcquire：CAS 0→1 ✅
 ```
 
-> 💡 **通俗理解**：AQS 就像银行柜台，`state` 是"正在办理"的指示灯（0=空闲，1=有人）。CLH 队列是排队区。新来的线程先看灯亮不亮——不亮就 CAS 去点亮（抢锁），亮了就乖乖排队（入队阻塞）。
+两个容易画错/理解错的点：
+
+- **竞争者永远不会"CAS state 1→2"**。`state+1` 是**持有者重入的专属动作**（而且因为是独占状态、只有 owner 能改，用的是 setState 而非 CAS）；非持有者的 tryAcquire 只做三件事：读 state → 不是 0 就看 owner 是不是自己 → 都不是则失败。
+- **state 不止 0 和 1**。对 ReentrantLock 它是**重入计数器**：A 重入 3 层则 state=3，unlock 一次只减 1，**减到 0 才真正释放、才触发唤醒**。上图场景恰好没有重入，所以只在 0↔1 之间变化；换成 Semaphore（剩余许可数）、CountDownLatch（剩余计数），state 的含义又完全不同（详见 AQS 笔记第二章）。
+
+> 💡 **通俗理解**：AQS 就像银行柜台，`state` 是柜台上的**计数牌**：对 ReentrantLock，0=空闲、n=有人且叠了 n 层业务（重入），办完一层减 1，减到 0 柜台才算真空出来；CLH 队列是排队区。新来的线程先看牌子——0 就 CAS 去抢，非 0 且不是自己的柜台就乖乖排队（入队阻塞）。
 
 ### 2.3 公平锁 vs 非公平锁
 
