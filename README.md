@@ -18,6 +18,7 @@
 - [分布式消息队列：Kafka 与 RocketMQ 核心原理与实战](web框架/MQ-Kafka-RocketMQ-Notes.md)
 - [Spring 依赖注入实现原理（三种注入方式、自动装配、循环依赖三级缓存）](web框架/Spring-DI-Notes.md)
 - [Spring Bean 生命周期（创建6步、销毁3种、BeanPostProcessor扩展点）](web框架/Spring-Bean-Lifecycle-Notes.md)
+- [MQTT 入门：把一个"充电桩"接进你的 Spring Boot（EMQX、MQTTX、发布订阅、保留消息、QoS）](web框架/MQTT.md)
 
 ## Java基础
 
