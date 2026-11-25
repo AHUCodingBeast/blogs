@@ -48,7 +48,7 @@
 
 ## 方案设计
 
-- 分布式理论基础：CAP、BASE、共识算法（Raft/Paxos）
+- [分布式理论基础：CAP、BASE、共识算法（Raft/Paxos、脑裂、多数派）](方案设计/Distributed-Theory-Notes.md)
 - 分布式 ID 生成：Snowflake、Leaf、数据库号段模式
 - 常用设计模式：策略、模板方法、观察者、责任链
 - 幂等设计与最终一致性保障
